@@ -1,6 +1,6 @@
 {
   "firestore": {
-    "database": "ai-studio-dailyinventoryau-00951ae3-ee45-4ad1-ad2a-6733dde9830e",
-    "rules": "firestore.rules"
+    "rules": "firestore.rules",
+    "database": "ai-studio-dailyinventoryau-00951ae3-ee45-4ad1-ad2a-6733dde9830e"
   }
 }

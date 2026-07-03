@@ -211,8 +211,8 @@ export function getFirestoreInstance(): Firestore | null {
           console.warn("⚠️ Failed to parse firebase.json for database ID:", e);
         }
       }
-      if (!databaseId || databaseId === "(default)") {
-        databaseId = "ai-studio-00951ae3-ee45-4ad1-ad2a-6733dde9830e";
+      if (!databaseId) {
+        databaseId = "(default)";
       }
 
       try {
@@ -245,14 +245,33 @@ export function getFirestoreInstance(): Firestore | null {
 }
 
 export function detectEnvironment(req?: any): string {
+  // 1. If explicit request is provided, check host and referer
+  if (req) {
+    const host = String(req.headers?.host || req.get?.('host') || "").toLowerCase();
+    const referer = String(req.headers?.referer || req.headers?.referrer || "").toLowerCase();
+    
+    if (host.includes("ais-pre") || referer.includes("ais-pre")) {
+      return "production";
+    }
+    if (host.includes("ais-dev") || referer.includes("ais-dev")) {
+      return "development";
+    }
+  }
+
+  // 2. Fallback to process.env.APP_ENV if set
   const env = (process.env.APP_ENV || "").trim().toLowerCase();
-  if (env === "production") {
+  if (env === "production" || env === "preview" || env === "prod") {
     return "production";
   }
   return "development";
 }
 
 export function getAppEnv(): string {
+  // Prefer the active AsyncLocalStorage context if available
+  const store = requestEnvStorage.getStore();
+  if (store) {
+    return store;
+  }
   return detectEnvironment();
 }
 

@@ -86,47 +86,37 @@ async function startServer() {
     }
     
     // 🛡️ ADVANCED SYSTEM ENVIRONMENT BOUNDARY ENFORCER:
-    const expectedTag = getAppEnv();
-    const isEnvValid = (expectedTag === "production" || expectedTag === "development" || expectedTag === "masters" || expectedTag === "master");
+    // Run startup sync for both development and production environments to guarantee both isolated SQLite files
+    // are fully bootstrapped and synchronized from Firestore on server startup.
+    for (const expectedTag of ["development", "production"]) {
+      await requestEnvStorage.run(expectedTag, async () => {
+        console.log(`🚀 Performing startup sync for environment secure partition: [${expectedTag.toUpperCase()}]`);
 
-    if (!isEnvValid) {
-      console.error("🛑 CRITICAL ERROR: APP_ENV environment variable is MISSING or INVALID!");
-      console.error("Allowed values are strictly: production | development | masters | master.");
-      console.error("Cloud synchronization, write, and restoration have been strictly DISABLED.");
-      setFirestoreApiDisabled(true);
-    } else {
-      console.log(`🛡️ Active Environment secure partition: [${expectedTag.toUpperCase()}]`);
+        // Check SQLite environment marker
+        let localTag = "";
+        try {
+          const tagRow = dbService.queryOne("SELECT value FROM settings WHERE key = 'environment_tag'");
+          if (tagRow) {
+            localTag = String(tagRow.value).trim().toLowerCase();
+          }
+        } catch (e) {}
 
-      // Check SQLite environment marker
-      let localTag = "";
-      try {
-        const tagRow = dbService.queryOne("SELECT value FROM settings WHERE key = 'environment_tag'");
-        if (tagRow) {
-          localTag = String(tagRow.value).trim().toLowerCase();
+        console.log(`🔍 SQLite [${expectedTag.toUpperCase()}] environment marker: '${localTag || "MISSING"}', Expected: '${expectedTag}'`);
+
+        // 🛡️ AUTO-ADOPTION: Associate local database with the current environment if missing or mismatched.
+        if (!localTag) {
+          console.log(`🌱 Current database missing tag. Associating with environment: [${expectedTag}] to enable Cloud Sync.`);
+          dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('environment_tag', ?)", [expectedTag]);
+          localTag = expectedTag;
         }
-      } catch (e) {}
 
-      console.log(`🔍 SQLite environment marker: '${localTag || "MISSING"}', Expected: '${expectedTag}'`);
+        if (localTag !== expectedTag) {
+          console.log(`🌱 Environment tag mismatch (Local: '${localTag}', System: '${expectedTag}'). Auto-adopting database to prevent disabling Cloud.`);
+          dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('environment_tag', ?)", [expectedTag]);
+          localTag = expectedTag;
+        }
 
-      // 🛡️ AUTO-ADOPTION: Associate local database with the current environment if missing or mismatched.
-      if (!localTag) {
-        console.log(`🌱 Current database missing tag. Associating with environment: [${expectedTag}] to enable Cloud Sync.`);
-        dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('environment_tag', ?)", [expectedTag]);
-        localTag = expectedTag;
-      }
-
-      if (localTag !== expectedTag) {
-        console.log(`🌱 Environment tag mismatch (Local: '${localTag}', System: '${expectedTag}'). Auto-adopting database to prevent disabling Cloud.`);
-        dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('environment_tag', ?)", [expectedTag]);
-        localTag = expectedTag;
-      }
-
-      const isLocalDbTrusted = true;
-
-      if (!isLocalDbTrusted) {
-        // unreachable, kept for code structure compatibility
-      } else {
-        console.log("✅ SQLite database environment matches system APP_ENV perfectly. Database tagged and trusted.");
+        console.log(`✅ SQLite database [${expectedTag.toUpperCase()}] matches system APP_ENV perfectly. Database tagged and trusted.`);
         
         // ☁️ Start synchronization & data restoration from Cloud
         const itemRow = dbService.queryOne("SELECT count(*) as count FROM inventory") as { count: number };
@@ -140,24 +130,24 @@ async function startServer() {
                               (!userRow || userRow.count <= 1);
 
         if (isSqliteEmpty) {
-          console.log(`☁️ SQLite is empty (possibly a stateless Cloud Run boot). Automatically restoring cloud backup for '${expectedTag}'...`);
+          console.log(`☁️ SQLite [${expectedTag.toUpperCase()}] is empty (possibly a stateless Cloud Run boot). Automatically restoring cloud backup...`);
           try {
             await FirebaseBackupService.restoreStateFromCloud(false);
           } catch (restoreErr: any) {
-            console.error(`🛑 Failed cloud state recovery during routine startup: ${restoreErr.message}`);
+            console.error(`🛑 Failed cloud state recovery during routine startup for [${expectedTag.toUpperCase()}]: ${restoreErr.message}`);
           }
         } else {
-          console.log("✅ SQLite has content. Performing emergency audit check to prevent data loss...");
+          console.log(`✅ SQLite [${expectedTag.toUpperCase()}] has content. Performing emergency audit check to prevent data loss...`);
           
           // 🛡️ EMERGENCY RECOVERY: Handle cases where activeSession was accidentally wiped but exists in local mirror
           if (!activeSessRow || !activeSessRow.value || activeSessRow.value === "null" || activeSessRow.value === "{}") {
-             console.log("⚠️ Active session is MISSING in SQLite. Checking local sync mirror for recovery...");
+             console.log(`⚠️ Active session is MISSING in SQLite [${expectedTag.toUpperCase()}]. Checking local sync mirror for recovery...`);
              try {
                 const mirrorPath = path.join(process.cwd(), "server", `server-local-sync-mirror_${expectedTag}.json`);
                 if (fs.existsSync(mirrorPath)) {
                    const mirror = JSON.parse(fs.readFileSync(mirrorPath, "utf-8"));
                    if (mirror && mirror.activeSession && mirror.activeSession.items && mirror.activeSession.items.length > 0) {
-                      console.log(`🚑 EMERGENCY RECOVERY: Found active session with ${mirror.activeSession.items.length} items in local mirror. Restoring...`);
+                      console.log(`🚑 EMERGENCY RECOVERY: Found active session with ${mirror.activeSession.items.length} items in local mirror for [${expectedTag.toUpperCase()}]. Restoring...`);
                       dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('activeSession', ?)", [JSON.stringify(mirror.activeSession)]);
                       const timestamp = new Date().toISOString();
                       dbService.run("INSERT INTO audit_logs (user_code, action, target_type, timestamp, ip_address, log_details) VALUES (?, ?, ?, ?, ?, ?)", 
@@ -166,7 +156,7 @@ async function startServer() {
                    }
                 }
              } catch (recoveryErr) {
-                console.error("❌ Emergency recovery failed:", recoveryErr);
+                console.error(`❌ Emergency recovery failed for [${expectedTag.toUpperCase()}]:`, recoveryErr);
              }
           }
         }
@@ -174,16 +164,16 @@ async function startServer() {
         // Guarantee that user profiles, default GM, and global settings are ALWAYS fully synced/loaded on startup
         try {
           await FirebaseBackupService.ensureDefaultGMInCloud().catch(e => {
-            console.warn("⚠️ Default GM user startup sync bypassed:", e.message || e);
+            console.warn(`⚠️ Default GM user startup sync bypassed for [${expectedTag.toUpperCase()}]:`, e.message || e);
           });
           await FirebaseBackupService.restoreUsersFromCloud(false).catch(e => {
-            console.warn("⚠️ User accounts startup sync bypassed:", e.message || e);
+            console.warn(`⚠️ User accounts startup sync bypassed for [${expectedTag.toUpperCase()}]:`, e.message || e);
           });
-          console.log("✅ Primary startup cloud data synchronization completed.");
+          console.log(`✅ Primary startup cloud data synchronization completed for [${expectedTag.toUpperCase()}].`);
         } catch (syncErr) {
-          console.error("⚠️ Startup cloud users/settings sync failed:", syncErr);
+          console.error(`⚠️ Startup cloud users/settings sync failed for [${expectedTag.toUpperCase()}]:`, syncErr);
         }
-      }
+      });
     }
   });
 

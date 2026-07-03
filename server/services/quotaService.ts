@@ -144,11 +144,12 @@ export class QuotaService {
         return total;
       }
     } catch (err: any) {
-      console.warn(`⚠️ Failed to fetch GCP metric ${metricType}:`, err.message || err);
       const errMsg = String(err.message || "").toLowerCase();
       if (errMsg.includes("permission_denied") || errMsg.includes("monitoring.googleapis.com") || errMsg.includes("disabled")) {
-        console.warn("🔒 GCP Monitoring API is not enabled or permission was denied. Bypassing live metrics fetch from GCP monitoring to save resources.");
+        // Silently disable GCP Monitoring to prevent log spam
         this.gcpMonitoringDisabled = true;
+      } else {
+        console.warn(`⚠️ Failed to fetch GCP metric ${metricType}:`, err.message || err);
       }
       return 0;
     }
