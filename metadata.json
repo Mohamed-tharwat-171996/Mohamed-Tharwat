@@ -1,0 +1,6 @@
+{
+  "name": "نظام جرد منتج تام - الإيمان للأعلاف",
+  "description": "ورقة الجرد الفعلى للمخزن بدون وصف لشركة الإيمان للأعلاف",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,132 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "A precoded or registered user inside the system",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "The unique user code for login"
+        },
+        "name": {
+          "type": "string",
+          "description": "The full name of the user"
+        },
+        "password": {
+          "type": "string",
+          "description": "Cleartext password or hash used for simplified login"
+        },
+        "role": {
+          "type": "string",
+          "description": "User role, such as system_admin or storekeeper"
+        }
+      },
+      "required": ["code", "name"]
+    },
+    "MasterItem": {
+      "title": "MasterItem",
+      "description": "A warehouse master item for auditing",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique item ID or barcode"
+        },
+        "name": {
+          "type": "string",
+          "description": "Item name"
+        },
+        "category": {
+          "type": "string",
+          "description": "Item category"
+        },
+        "bookQty": {
+          "type": "number",
+          "description": "Theoretical system book quantity"
+        },
+        "unit": {
+          "type": "string",
+          "description": "Measurement unit"
+        }
+      },
+      "required": ["id", "name"]
+    },
+    "AuditSession": {
+      "title": "AuditSession",
+      "description": "An active or archived inventory audit session",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Session unique ID"
+        },
+        "title": {
+          "type": "string",
+          "description": "Session description or title"
+        },
+        "status": {
+          "type": "string",
+          "description": "Status: active, pending, completed"
+        },
+        "createdBy": {
+          "type": "string",
+          "description": "Creator user code"
+        },
+        "createdAt": {
+          "type": "number",
+          "description": "Created UTC millis timestamp"
+        },
+        "items": {
+          "type": "array",
+          "description": "Audit item physical vs book differences"
+        }
+      }
+    },
+    "SystemState": {
+      "title": "SystemState",
+      "description": "The unified system database state containing users, items, and sessions",
+      "type": "object",
+      "properties": {
+        "precodedUsers": {
+          "type": "array",
+          "description": "List of system operators predefined"
+        },
+        "registeredUsers": {
+          "type": "array",
+          "description": "List of active registered user profiles"
+        },
+        "masterItems": {
+          "type": "array",
+          "description": "Master list of inventory materials"
+        },
+        "activeSession": {
+          "$ref": "#/entities/AuditSession",
+          "description": "The currently active audit count session"
+        },
+        "pastSessions": {
+          "type": "array",
+          "description": "Historical system audit sessions archives"
+        },
+        "lastUpdated": {
+          "type": "number",
+          "description": "Epoch timestamp when state was last updated"
+        }
+      }
+    }
+  },
+  "firestore": {
+    "/app_state/master": {
+      "schema": "SystemState",
+      "description": "Unified Master State for real-time instantaneous cloud persistence"
+    },
+    "/app_state/development": {
+      "schema": "SystemState",
+      "description": "Unified Development State for real-time instantaneous cloud persistence"
+    },
+    "/backups_history/{backupId}": {
+      "schema": "SystemState",
+      "description": "Historical cloud backup copy for rotation and recovery"
+    }
+  }
+}
