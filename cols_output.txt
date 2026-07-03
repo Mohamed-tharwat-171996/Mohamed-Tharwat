@@ -1,0 +1,17 @@
+--- DEFAULT DATABASE ---
+[2026-07-03T16:25:27.210Z]  @firebase/firestore: Firestore (12.14.0): GrpcConnection RPC 'Listen' stream 0x72ef5a4f error. Code: 5 Message: 5 NOT_FOUND: 
+[2026-07-03T16:25:27.212Z]  @firebase/firestore: Firestore (12.14.0): Could not reach Cloud Firestore backend. Connection failed 1 times. Most recent error: FirebaseError: [code=not-found]: 5 NOT_FOUND: 
+This typically indicates that your device does not have a healthy Internet connection at the moment. The client will operate in offline mode until it is able to successfully connect to the backend.
+[2026-07-03T16:25:27.398Z]  @firebase/firestore: Firestore (12.14.0): GrpcConnection RPC 'Listen' stream 0x72ef5a50 error. Code: 5 Message: 5 NOT_FOUND: 
+[2026-07-03T16:25:28.484Z]  @firebase/firestore: Firestore (12.14.0): GrpcConnection RPC 'Listen' stream 0x72ef5a51 error. Code: 5 Message: 5 NOT_FOUND: 
+[2026-07-03T16:25:29.918Z]  @firebase/firestore: Firestore (12.14.0): GrpcConnection RPC 'Listen' stream 0x72ef5a52 error. Code: 5 Message: 5 NOT_FOUND: 
+[2026-07-03T16:25:32.541Z]  @firebase/firestore: Firestore (12.14.0): GrpcConnection RPC 'Listen' stream 0x72ef5a53 error. Code: 5 Message: 5 NOT_FOUND: 
+[2026-07-03T16:25:34.338Z]  @firebase/firestore: Firestore (12.14.0): GrpcConnection RPC 'Listen' stream 0x72ef5a54 error. Code: 5 Message: 5 NOT_FOUND: 
+[2026-07-03T16:25:37.133Z]  @firebase/firestore: Firestore (12.14.0): GrpcConnection RPC 'Listen' stream 0x72ef5a55 error. Code: 5 Message: 5 NOT_FOUND: 
+[2026-07-03T16:25:46.169Z]  @firebase/firestore: Firestore (12.14.0): GrpcConnection RPC 'Listen' stream 0x72ef5a56 error. Code: 5 Message: 5 NOT_FOUND: 
+[2026-07-03T16:26:01.377Z]  @firebase/firestore: Firestore (12.14.0): GrpcConnection RPC 'Listen' stream 0x72ef5a57 error. Code: 5 Message: 5 NOT_FOUND: 
+[2026-07-03T16:26:22.852Z]  @firebase/firestore: Firestore (12.14.0): GrpcConnection RPC 'Listen' stream 0x72ef5a58 error. Code: 5 Message: 5 NOT_FOUND: 
+--- AI STUDIO DATABASE ---
+users_development: 1
+users_production: 1
+Killed

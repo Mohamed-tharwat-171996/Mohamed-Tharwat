@@ -211,8 +211,8 @@ export function getFirestoreInstance(): Firestore | null {
           console.warn("⚠️ Failed to parse firebase.json for database ID:", e);
         }
       }
-      if (!databaseId) {
-        databaseId = "(default)";
+      if (!databaseId || databaseId === "(default)") {
+        databaseId = "ai-studio-00951ae3-ee45-4ad1-ad2a-6733dde9830e";
       }
 
       try {
