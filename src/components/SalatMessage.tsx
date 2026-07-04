@@ -99,7 +99,7 @@ const SalatMessage = ({ plain = false }: SalatMessageProps) => {
   }
 
   return (
-    <div className="w-full max-w-3xl mx-auto px-6 py-6 sm:py-8 flex flex-col items-center justify-center text-center animate-fadeIn relative mt-2 mb-auto shrink-0" dir="rtl">
+    <div className="w-full max-w-3xl mx-auto px-4 py-4 flex flex-col items-center justify-center text-center animate-fadeIn relative my-1 shrink-0" dir="rtl">
       {innerContent}
     </div>
   );

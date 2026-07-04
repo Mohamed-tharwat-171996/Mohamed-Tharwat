@@ -244,30 +244,68 @@ export default function StoresManagerDashboard({
   // Helper to handle Excel Export for the current view
   const handleExportExcel = () => {
     try {
-      const dataToExport = itemsDashboardData.map(item => {
-        // Collect all modifications for this item as a string
-        const modsStr = item.modifications.map((m: any) => 
-          `${m.modifier} (${m.modifierRole}): ${m.oldQty} -> ${m.newQty} [${new Date(m.timestamp).toLocaleDateString('ar-EG')}]`
-        ).join(' | ');
+      const detailedRows: any[] = [];
 
-        return {
-          "كود الصنف": item.itemId,
-          "اسم الصنف": item.name,
-          "إجمالي الجرودات": item.totalChecks,
-          "تعديلات الأمين": item.totalStorekeeperModifications,
-          "تعديلات المشرفين": item.supervisorCorrectionsCount,
-          "تعديلات المسئول": item.managerCorrectionsCount,
-          "الفرق الحالي": item.latestDiff,
-          "الفرق السابق": item.history[1]?.diff || 0,
-          "إجمالي الانحراف": item.absoluteDiscrepancy,
-          "تفاصيل التعديلات": modsStr
-        };
+      itemsDashboardData.forEach(item => {
+        item.history.forEach((h: any) => {
+          const modsStr = (h.modifications || []).map((m: any) => 
+            `${m.modifier} (${m.modifierRole}): ${m.oldQty} -> ${m.newQty}`
+          ).join(' | ');
+
+          detailedRows.push({
+            "كود الصنف": item.itemId,
+            "اسم الصنف": item.name,
+            "الوحدة": item.unit || "عدد",
+            "تاريخ الجرد": h.displayDate,
+            "أمين العهدة": h.auditor,
+            "اسم الجلسة": h.sessionName || "-",
+            "الرصيد الدفتري": h.book,
+            "جرد الأمين": h.storekeeper !== null ? h.storekeeper : "-",
+            "جرد المشرف": h.supervisor !== null ? h.supervisor : "-",
+            "جرد المسئول": h.manager !== null ? h.manager : "-",
+            "الرصيد المعتمد": h.physical,
+            "الفرق": h.diff,
+            "حالة الجرد": h.diff === 0 ? "مطابق" : (h.diff > 0 ? `زيادة (+${h.diff})` : `عجز (${h.diff})`),
+            "تعديلات المسئولين": modsStr || "-",
+            "الملاحظات": h.note || "-"
+          });
+        });
+
+        if (item.history.length === 0) {
+          detailedRows.push({
+            "كود الصنف": item.itemId,
+            "اسم الصنف": item.name,
+            "الوحدة": item.unit || "عدد",
+            "حالة الجرد": "لا توجد سجلات تاريخية"
+          });
+        }
       });
 
-      const ws = XLSX.utils.json_to_sheet(dataToExport);
+      const ws = XLSX.utils.json_to_sheet(detailedRows);
+      
+      // Set column widths for better readability
+      const wscols = [
+        { wch: 15 }, // كود الصنف
+        { wch: 30 }, // اسم الصنف
+        { wch: 10 }, // الوحدة
+        { wch: 15 }, // تاريخ الجرد
+        { wch: 20 }, // أمين العهدة
+        { wch: 20 }, // اسم الجلسة
+        { wch: 15 }, // الرصيد الدفتري
+        { wch: 15 }, // جرد الأمين
+        { wch: 15 }, // جرد المشرف
+        { wch: 15 }, // جرد المسئول
+        { wch: 15 }, // الرصيد المعتمد
+        { wch: 10 }, // الفرق
+        { wch: 20 }, // حالة الجرد
+        { wch: 50 }, // تعديلات المسئولين
+        { wch: 30 }  // الملاحظات
+      ];
+      ws['!cols'] = wscols;
+
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "تقرير الجرد");
-      XLSX.writeFile(wb, `تقرير_جرد_المستودع_${new Date().toISOString().split('T')[0]}.xlsx`);
+      XLSX.utils.book_append_sheet(wb, ws, "تفاصيل الجرد");
+      XLSX.writeFile(wb, `تقرير_جرد_تفصيلي_${new Date().toISOString().split('T')[0]}.xlsx`);
     } catch (error) {
       console.error("Excel Export Error:", error);
       alert("حدث خطأ أثناء تصدير ملف Excel");
@@ -687,7 +725,10 @@ export default function StoresManagerDashboard({
         note: item.note || item.notes || "",
         modification: item.modification || "",
         versionNumber: itemVersionNum,
-        auditor: allUsers.find(u => String(u.code) === String(item.assignedTo))?.name || `أمين رقم ${item.assignedTo || "عام"}`
+        auditor: allUsers.find(u => String(u.code) === String(item.assignedTo))?.name || `أمين رقم ${item.assignedTo || "عام"}`,
+        storekeeperModCount,
+        supervisorModCount,
+        managerModCount
       });
     });
 
@@ -1349,10 +1390,10 @@ export default function StoresManagerDashboard({
   }, [selectedItemIdFilter]);
 
   return (
-    <div className="bg-slate-50 w-full min-h-screen text-right font-sans select-none pb-12" dir="rtl">
+    <div className="bg-slate-50 w-full min-h-0 text-right font-sans select-none pb-6" dir="rtl">
       
       {/* 📊 Unified Metric Row (5 Cards) - Vertical layout to save width */}
-      <div className="grid grid-cols-5 gap-1 mb-1 px-2 -mt-1.5">
+      <div className="grid grid-cols-5 gap-1 mb-1 px-2 mt-0">
         
         {/* Card 1: Sessions Count */}
         <motion.div 
@@ -1611,7 +1652,7 @@ export default function StoresManagerDashboard({
       </div>
 
       {/* 📂 Unified Dashboard Content Renderer */}
-      <div className="bg-white border border-slate-200 rounded-3xl shadow-sm p-4 min-h-[400px] mt-1">
+      <div className="bg-white border border-slate-200 rounded-3xl shadow-sm p-4 min-h-0 mt-1">
         <AnimatePresence mode="wait">
           
           {/* TAB 1: Item review with horizontal scroll fix & expandable inline history */}
@@ -1671,7 +1712,7 @@ export default function StoresManagerDashboard({
                     <tbody>
                       {itemsDashboardData.length === 0 ? (
                         <tr>
-                          <td colSpan={12} className="text-center py-8 text-slate-400 font-bold">لا توجد نتائج تطابق خيارات التصفية أو ترشيح ثبات الانحرافات الحالي</td>
+                          <td colSpan={13} className="text-center py-8 text-slate-400 font-bold">لا توجد نتائج تطابق خيارات التصفية أو ترشيح ثبات الانحرافات الحالي</td>
                         </tr>
                       ) : (
                         itemsDashboardData.map(item => {
@@ -1746,7 +1787,7 @@ export default function StoresManagerDashboard({
                               <AnimatePresence initial={false}>
                                 {isExpanded && (
                                   <tr>
-                                    <td colSpan={10} className="bg-slate-50/75 p-0 border-b border-slate-150">
+                                    <td colSpan={13} className="bg-slate-50/75 p-0 border-b border-slate-150">
                                       <motion.div
                                         initial={{ height: 0, opacity: 0 }}
                                         animate={{ height: "auto", opacity: 1 }}
@@ -1980,7 +2021,7 @@ export default function StoresManagerDashboard({
                       <tbody>
                         {auditorsDashboardData.length === 0 ? (
                            <tr>
-                             <td colSpan={11} className="text-center py-12 text-slate-400 font-bold">لا يوجد أمناء جرد مسجلين أو جرد متاح لهذه الفترة</td>
+                             <td colSpan={13} className="text-center py-12 text-slate-400 font-bold">لا يوجد أمناء جرد مسجلين أو جرد متاح لهذه الفترة</td>
                            </tr>
                         ) : (
                            auditorsDashboardData.map(auditor => {
@@ -2044,7 +2085,7 @@ export default function StoresManagerDashboard({
                                   <AnimatePresence initial={false}>
                                     {isExpanded && (
                                       <tr>
-                                        <td colSpan={11} className="bg-slate-50/75 p-0 border-b border-slate-150">
+                                        <td colSpan={13} className="bg-slate-50/75 p-0 border-b border-slate-150">
                                         <motion.div
                                           initial={{ height: 0, opacity: 0 }}
                                           animate={{ height: "auto", opacity: 1 }}
@@ -2201,7 +2242,7 @@ export default function StoresManagerDashboard({
                       <tbody>
                         {supervisorStats.length === 0 ? (
                           <tr>
-                            <td colSpan={8} className="text-center py-12 text-slate-400 font-bold">لم يتم تسجيل أي اعتماد رسمي من قبل مشرفي المخازن حتى الآن</td>
+                            <td colSpan={10} className="text-center py-12 text-slate-400 font-bold">لم يتم تسجيل أي اعتماد رسمي من قبل مشرفي المخازن حتى الآن</td>
                           </tr>
                         ) : (
                           supervisorStats.map(sup => {
@@ -2263,7 +2304,7 @@ export default function StoresManagerDashboard({
                                 <AnimatePresence initial={false}>
                                   {isExpanded && (
                                     <tr>
-                                      <td colSpan={8} className="bg-slate-50/75 p-0 border-b border-slate-150">
+                                      <td colSpan={10} className="bg-slate-50/75 p-0 border-b border-slate-150">
                                         <motion.div
                                           initial={{ height: 0, opacity: 0 }}
                                           animate={{ height: "auto", opacity: 1 }}

@@ -147,6 +147,8 @@ export class AuthService {
 
     // Query Firestore strictly - completely separated from SQLite, live directly to Firestore only
     try {
+      const resolvedColl = resolveCollectionName("users");
+      console.log(`🔐 Login attempt for [${codeClean}] in collection: ${resolvedColl}`);
       dbUser = await getFirestoreDoc("users", codeClean);
       if (!dbUser && codeClean === "18") {
         console.log("🔒 Master account 18 missing in Firestore during login. Re-seeding securely...");

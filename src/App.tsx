@@ -2595,8 +2595,8 @@ export default function App() {
           inventoriedByCode: user?.code,
           inventoriedByName: user?.name || `مستخدم ${user?.code}`,
           inventoriedAt: new Date().toISOString(),
+          storekeeperModifications: item.storekeeperModifications || [],
           ...(isStorekeeper ? { 
-            storekeeperQty: calculatedQty,
             supervisorQty: null,
             managerQty: null
           } : {}),
@@ -3001,7 +3001,14 @@ export default function App() {
     const updatedItems = activeSession.items.map((item) => {
       if (item.assignedTo === user.code) {
         const newSkMods = [...(item.storekeeperModifications || [])];
-        if (item.recheckRequested && item.storekeeperQty !== null && item.storekeeperQty !== item.physicalQty) {
+        const lastMod = newSkMods.length > 0 ? newSkMods[newSkMods.length - 1] : null;
+
+        // Only add a new modification entry if it's different from the last recorded one
+        // and it's a genuine re-count (recheckRequested or change from previously submitted storekeeperQty)
+        if (item.recheckRequested && 
+            item.storekeeperQty !== null && 
+            item.storekeeperQty !== item.physicalQty &&
+            (!lastMod || lastMod.newQty !== item.physicalQty)) {
           newSkMods.push({
             modifiedBy: user.code,
             modifiedByName: user.name,
@@ -5952,7 +5959,7 @@ export default function App() {
                 </div>
               ) : totalMasterCount === 0 ? (
                 /* Falling back to Welcome message ONLY when no data is loaded at all */
-                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-10 my-auto flex flex-col items-center justify-center text-center animate-fadeIn min-h-[350px] space-y-4" dir="rtl">
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-6 my-auto flex flex-col items-center justify-center text-center animate-fadeIn min-h-0 space-y-4" dir="rtl">
                   <div className="w-14 h-14 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center animate-pulse">
                     <Sparkles className="w-7 h-7" />
                   </div>

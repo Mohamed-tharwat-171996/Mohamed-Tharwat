@@ -132,7 +132,8 @@ async function startServer() {
         if (isSqliteEmpty) {
           console.log(`☁️ SQLite [${expectedTag.toUpperCase()}] is empty (possibly a stateless Cloud Run boot). Automatically restoring cloud backup...`);
           try {
-            await FirebaseBackupService.restoreStateFromCloud(false);
+            const success = await FirebaseBackupService.restoreStateFromCloud(false);
+            console.log(`☁️ [SYNC_RESULT] FirebaseBackupService.restoreStateFromCloud for [${expectedTag}]: ${success ? "SUCCESS" : "NO_BACKUP_FOUND"}`);
           } catch (restoreErr: any) {
             console.error(`🛑 Failed cloud state recovery during routine startup for [${expectedTag.toUpperCase()}]: ${restoreErr.message}`);
           }
@@ -166,7 +167,9 @@ async function startServer() {
           await FirebaseBackupService.ensureDefaultGMInCloud().catch(e => {
             console.warn(`⚠️ Default GM user startup sync bypassed for [${expectedTag.toUpperCase()}]:`, e.message || e);
           });
-          await FirebaseBackupService.restoreUsersFromCloud(false).catch(e => {
+          await FirebaseBackupService.restoreUsersFromCloud(false).then(() => {
+             console.log(`☁️ [SYNC_RESULT] FirebaseBackupService.restoreUsersFromCloud for [${expectedTag}]: DONE`);
+          }).catch(e => {
             console.warn(`⚠️ User accounts startup sync bypassed for [${expectedTag.toUpperCase()}]:`, e.message || e);
           });
           console.log(`✅ Primary startup cloud data synchronization completed for [${expectedTag.toUpperCase()}].`);

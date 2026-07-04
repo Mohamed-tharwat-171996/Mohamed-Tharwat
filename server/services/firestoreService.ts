@@ -250,11 +250,22 @@ export function detectEnvironment(req?: any): string {
     const host = String(req.headers?.host || req.get?.('host') || "").toLowerCase();
     const referer = String(req.headers?.referer || req.headers?.referrer || "").toLowerCase();
     
-    if (host.includes("ais-pre") || referer.includes("ais-pre")) {
+    // DEBUG: Logging detection parameters
+    const xForwardedHost = String(req.headers?.['x-forwarded-host'] || "").toLowerCase();
+    if (host.includes("ais-") || referer.includes("ais-") || xForwardedHost.includes("ais-")) {
+       console.log(`🔍 [ENV_DEBUG] Host: ${host}, X-Forwarded-Host: ${xForwardedHost}, Referer: ${referer}`);
+    }
+
+    if (host.includes("ais-pre") || referer.includes("ais-pre") || xForwardedHost.includes("ais-pre")) {
       return "production";
     }
-    if (host.includes("ais-dev") || referer.includes("ais-dev")) {
+    if (host.includes("ais-dev") || referer.includes("ais-dev") || xForwardedHost.includes("ais-dev") || host.startsWith("3000-")) {
       return "development";
+    }
+
+    // Default for deployed Cloud Run apps or other production environments
+    if (host.includes(".run.app") || xForwardedHost.includes(".run.app")) {
+      return "production";
     }
   }
 
