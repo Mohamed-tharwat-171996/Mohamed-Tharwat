@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import bcrypt from "bcryptjs";
 import { dbService } from "../database/dbService";
-import { getFirestoreInstance, getFirestoreApiDisabled, setFirestoreApiDisabled, isFirestoreErrorDisabled, reinitializeFirestore, resolveCollectionName, getAppEnv, isAppEnvValid } from "./firestoreService";
+import { getFirestoreInstance, getFirestoreApiDisabled, setFirestoreApiDisabled, isFirestoreErrorDisabled, reinitializeFirestore, resolveCollectionName, getAppEnv, isAppEnvValid, getFirestoreDoc, setFirestoreDoc, getFirestoreCollection } from "./firestoreService";
 import { QuotaService } from "./quotaService";
 
 const OVERRIDE_TIMEOUT_MS = 30000;
@@ -473,11 +473,9 @@ export class FirebaseBackupService {
       let hasLiveUsersCount = false;
       if (db) {
         try {
-          const resolvedUsersName = resolveCollectionName("users");
-          const usersCollectionRef = collection(db, resolvedUsersName);
-          const usersSnap = await withTimeout(getDocs(usersCollectionRef), OVERRIDE_TIMEOUT_MS, "getUsersCount");
-          if (usersSnap) {
-            liveUsersCount = usersSnap.size;
+          const usersList = await getFirestoreCollection("users");
+          if (usersList && usersList.length > 0) {
+            liveUsersCount = usersList.length;
             hasLiveUsersCount = true;
           }
         } catch (err) {
@@ -1141,6 +1139,37 @@ export class FirebaseBackupService {
   /**
    * Deep reconstruct of local users table from Firestore 'users' collection.
    */
+  /**
+   * Deep sync of local users table to Firestore 'users' collection.
+   */
+  public static async pushUsersToCloud(): Promise<void> {
+    try {
+      if (getFirestoreApiDisabled()) return;
+      const db = getFirestoreInstance();
+      if (!db) return;
+
+      const users = dbService.query("SELECT * FROM users") as any[];
+      if (!users || users.length === 0) return;
+
+      console.log(`☁️ CLOUD SYNC: Pushing ${users.length} user accounts to Firestore...`);
+      for (const u of users) {
+        const code = String(u.code).trim().toLowerCase();
+        if (!code) continue;
+
+        // Ensure we don't accidentally overwrite cloud data with older local data unless it's necessary
+        // In this case, we just want to make sure they exist
+        await setFirestoreDoc("users", code, {
+          ...u,
+          code: code,
+          updated_at: u.updated_at || Date.now()
+        });
+      }
+      console.log("✅ CLOUD SYNC: User accounts successfully pushed to Firestore.");
+    } catch (err: any) {
+      console.warn("⚠️ Failed to push users to Firestore:", err.message || err);
+    }
+  }
+
   public static async restoreUsersFromCloud(force = false): Promise<void> {
     const now = Date.now();
     

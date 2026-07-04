@@ -444,52 +444,7 @@ export default function StoresManagerDashboard({
     };
   }, [pastSessions, selectedItemIdFilter, selectedAuditor, startDate, endDate]);
 
-  // 5. Detect Cross-Session Modifications (Implicit Storekeeper Modifications)
-  const crossSessionModsMap = useMemo(() => {
-    const map = new Map<string, any[]>(); // item_sessionId -> modification objects
-    const lastPhysicalMap = new Map<string, { physical: number; timestamp: number }>();
-    
-    // Sort all items by date to track physical state transitions across sessions
-    const allItemsSorted = [...filteredData.items].sort((a, b) => 
-      new Date(a.sessionDate || 0).getTime() - new Date(b.sessionDate || 0).getTime()
-    );
-
-    allItemsSorted.forEach(item => {
-      const id = String(item.itemId || item.id || "");
-      const skVal = item.storekeeperQty !== undefined && item.storekeeperQty !== null 
-        ? item.storekeeperQty 
-        : (item.physicalQty !== null && item.physicalQty !== undefined ? item.physicalQty : null);
-      
-      const supervisorVal = item.supervisorQty !== undefined && item.supervisorQty !== null ? item.supervisorQty : null;
-      const managerVal = item.managerQty !== undefined && item.managerQty !== null ? item.managerQty : null;
-      const finalPhysical = managerVal !== null ? managerVal : (supervisorVal !== null ? supervisorVal : (skVal !== null ? skVal : 0));
-      
-      const last = lastPhysicalMap.get(id);
-      if (last && skVal !== null && skVal !== last.physical) {
-        const key = `${id}_${item.sessionId}`;
-        const details = getUserDetails(item.assignedTo || "103", "امين مخازن", "أمين مخزن");
-        
-        if (!map.has(key)) map.set(key, []);
-        map.get(key)!.push({
-          modifier: details.name,
-          modifierRole: details.role,
-          newQty: skVal,
-          oldQty: last.physical,
-          timestamp: new Date(item.sessionDate || 0).getTime(),
-          sessionName: item.sessionName,
-          isStorekeeperModification: true,
-          isCrossSession: true
-        });
-      }
-      
-      lastPhysicalMap.set(id, { 
-        physical: finalPhysical, 
-        timestamp: new Date(item.sessionDate || 0).getTime() 
-      });
-    });
-
-    return map;
-  }, [filteredData, allUsers]);
+  // 5. Detect Cross-Session Modifications (Removed: Each session is independent as requested)
 
   // 6. Group and Process Items with History & Discrepancy Streaks
   const itemsDashboardData = useMemo(() => {
@@ -579,9 +534,8 @@ export default function StoresManagerDashboard({
       }));
       itemModifications.push(...skMods);
 
-      // 1b. Add Cross-Session Modifications
-      const crossSessionMods = crossSessionModsMap.get(`${id}_${item.sessionId}`) || [];
-      itemModifications.push(...crossSessionMods);
+      // 1b. Add Cross-Session Modifications (Removed: Each session is independent)
+      const crossSessionMods: any[] = [];
       
       // 2. Supervisor Correction
       if (isSupervisorCorrection) {
@@ -695,7 +649,7 @@ export default function StoresManagerDashboard({
       entry.absoluteDiscrepancy += Math.abs(diff);
       entry.netDiscrepancy += diff;
       
-      const storekeeperModCount = skMods.length + crossSessionMods.length;
+      const storekeeperModCount = skMods.length;
       const supervisorModCount = isSupervisorCorrection ? 1 : 0;
       const managerModCount = (isManagerActiveSessionCorrection ? 1 : 0) + sessionArchiveModifications.length;
 
@@ -971,8 +925,7 @@ export default function StoresManagerDashboard({
       const isManagerActiveSessionCorrection = qtyAtArchiveForCount !== null && preManagerQtyForCount !== null && qtyAtArchiveForCount !== preManagerQtyForCount;
 
       const id = String(item.itemId || item.id || "");
-      const crossSessionModCount = (crossSessionModsMap.get(`${id}_${item.sessionId}`) || []).length;
-      const storekeeperModCount = getStorekeeperModifications(item).length + crossSessionModCount;
+      const storekeeperModCount = getStorekeeperModifications(item).length;
       const supervisorModCount = isSupervisorCorrection ? 1 : 0;
       const managerModCount = sessionModsCount + (isManagerActiveSessionCorrection ? 1 : 0);
 
@@ -1209,7 +1162,7 @@ export default function StoresManagerDashboard({
             diff,
             storekeeperName: allUsers.find(u => String(u.code) === String(item.assignedTo))?.name || `أمين (${item.assignedTo || "عام"})`,
             note: item.note || item.notes || "",
-            totalStorekeeperModifications: getStorekeeperModifications(item).length + (crossSessionModsMap.get(`${item.itemId || item.id}_${session.id}`) || []).length,
+            totalStorekeeperModifications: getStorekeeperModifications(item).length,
             totalSupervisorCorrections: (skVal !== null && supervisorVal !== null && skVal !== supervisorVal) ? 1 : 0,
             totalManagerCorrections: (session.modifications || []).filter((mod: any) => 
               mod.itemChanges?.some((change: any) => 

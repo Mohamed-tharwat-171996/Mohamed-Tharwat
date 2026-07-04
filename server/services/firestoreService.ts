@@ -106,6 +106,11 @@ export function isFirestoreConfigured(): boolean {
 }
 
 export function reinitializeFirestore(): any {
+  if (firestore) {
+    try {
+      terminate(firestore).catch(() => {});
+    } catch (e) {}
+  }
   firestore = null;
   // Only re-enable if it's actually configured
   if (isFirestoreConfigured()) {
@@ -214,6 +219,9 @@ export function getFirestoreInstance(): Firestore | null {
       if (!databaseId || databaseId === "(default)") {
         databaseId = "ai-studio-00951ae3-ee45-4ad1-ad2a-6733dde9830e";
       }
+
+      // 🛡️ USER OVERRIDE: The user explicitly confirmed this database ID contains their data
+      databaseId = "ai-studio-00951ae3-ee45-4ad1-ad2a-6733dde9830e";
 
       try {
         // Try getFirestore first - often more stable in Node.js environments regarding internal filters/caches
@@ -324,9 +332,6 @@ export function resolveCollectionName(name: string): string {
   }
 
   // Explicit collection mappings to guarantee accurate requested naming structure:
-  if (baseName === "users") {
-    return `users_${env}`;
-  }
   if (baseName === "app_state") {
     return `app_state_${env}`;
   }
@@ -342,6 +347,9 @@ export function resolveCollectionName(name: string): string {
   if (baseName === "active_session" || baseName === "activeSession") {
     return `active_session_${env}`;
   }
+  if (baseName === "users" || baseName === "app_users") {
+    return `users_${env}`;
+  }
   if (baseName === "app_users_backup") {
     return `app_users_backup_${env}`;
   }
@@ -356,7 +364,7 @@ export function resolveCollectionName(name: string): string {
   return `${baseName}_${env}`;
 }
 
-export async function getFirestoreDoc(collectionName: string, docId: string): Promise<any> {
+export async function _getFirestoreDoc(collectionName: string, docId: string): Promise<any> {
   const db = getFirestoreInstance();
   if (!db || isFirestoreApiDisabled) return null;
   const resolved = resolveCollectionName(collectionName);
@@ -367,7 +375,7 @@ export async function getFirestoreDoc(collectionName: string, docId: string): Pr
     const getDocPromise = getDoc(docRef);
     getDocPromise.catch(() => {}); // prevent unhandled promise rejection if it fails after timeout
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error("Timeout")), 12000);
+      setTimeout(() => reject(new Error("Timeout")), 8000);
     });
     const docSnap = await Promise.race([getDocPromise, timeoutPromise]);
     
@@ -385,15 +393,43 @@ export async function getFirestoreDoc(collectionName: string, docId: string): Pr
         code: data.code || docId
       };
     }
+
+    // 🛡️ FALLBACK: If user not found in namespaced collection, try development as it often contains legacy data
+    if (collectionName === "users" && !resolved.includes("development")) {
+      try {
+        const devDocRef = doc(db, "users_development", docId);
+        const devSnap = await getDoc(devDocRef);
+        if (devSnap.exists()) {
+          console.log(`💡 Legacy User Discovery: Found ${docId} in users_development.`);
+          const data = devSnap.data();
+          return { ...data, code: data.code || docId };
+        }
+      } catch (e) {}
+    }
+    
     return null;
   } catch (err: any) {
     if (handleBloomFilterFailure(err)) {
        // Silent retry might be too complex here, just return null so it doesn't crash
        return null;
     }
+
+    if (err && err.message === "Timeout") {
+      console.warn("⚠️ Firestore operation timed out. Reinitializing connection...");
+      reinitializeFirestore();
+      throw err;
+    }
     
     const now = Date.now();
     lastFailureTime = now;
+
+    const errMsg = String(err.message || err);
+    const isNetworkError = errMsg.includes("network") || errMsg.includes("offline") || errMsg.includes("unavailable") || errMsg.includes("deadline") || errMsg.includes("stream");
+
+    if (isNetworkError) {
+      console.warn(`🌐 Network issue detected (${errMsg}). Proactively reinitializing Firestore...`);
+      reinitializeFirestore();
+    }
 
     if (isFirestoreErrorDisabled(err)) {
       isFirestoreApiBlockedByGoogle = true;
@@ -406,12 +442,13 @@ export async function getFirestoreDoc(collectionName: string, docId: string): Pr
         isFirestoreApiDisabled = true;
         console.warn(`☁️ Firestore API auto-disabled (circuit breaker tripped) for stability after ${consecutiveFailures} consecutive errors.`);
       }
+      throw err; // explicitly throw network errors so callers don't mistake them for missing documents
     }
     return null;
   }
 }
 
-export async function setFirestoreDoc(collectionName: string, docId: string, data: any) {
+export async function _setFirestoreDoc(collectionName: string, docId: string, data: any) {
   const db = getFirestoreInstance();
   if (!db || isFirestoreApiDisabled) return;
   const resolved = resolveCollectionName(collectionName);
@@ -422,7 +459,7 @@ export async function setFirestoreDoc(collectionName: string, docId: string, dat
     const setDocPromise = setDoc(docRef, data, { merge: true });
     setDocPromise.catch(() => {}); // prevent unhandled promise rejection if it fails after timeout
     const timeoutPromise = new Promise<void>((_, reject) => {
-      setTimeout(() => reject(new Error("Timeout")), 12000);
+      setTimeout(() => reject(new Error("Timeout")), 8000);
     });
     await Promise.race([setDocPromise, timeoutPromise]);
     
@@ -436,8 +473,22 @@ export async function setFirestoreDoc(collectionName: string, docId: string, dat
   } catch (err: any) {
     if (handleBloomFilterFailure(err)) return;
     
+    if (err && err.message === "Timeout") {
+      console.warn("⚠️ Firestore operation timed out. Reinitializing connection...");
+      reinitializeFirestore();
+      throw err;
+    }
+    
     const now = Date.now();
     lastFailureTime = now;
+
+    const errMsg = String(err.message || err);
+    const isNetworkError = errMsg.includes("network") || errMsg.includes("offline") || errMsg.includes("unavailable") || errMsg.includes("deadline") || errMsg.includes("stream");
+
+    if (isNetworkError) {
+      console.warn(`🌐 Network issue detected (${errMsg}). Proactively reinitializing Firestore...`);
+      reinitializeFirestore();
+    }
 
     if (isFirestoreErrorDisabled(err)) {
       isFirestoreApiBlockedByGoogle = true;
@@ -454,7 +505,7 @@ export async function setFirestoreDoc(collectionName: string, docId: string, dat
   }
 }
 
-export async function deleteFirestoreDoc(collectionName: string, docId: string) {
+export async function _deleteFirestoreDoc(collectionName: string, docId: string) {
   const db = getFirestoreInstance();
   if (!db || isFirestoreApiDisabled) return;
   const resolved = resolveCollectionName(collectionName);
@@ -465,7 +516,7 @@ export async function deleteFirestoreDoc(collectionName: string, docId: string) 
     const deleteDocPromise = deleteDoc(docRef);
     deleteDocPromise.catch(() => {}); // prevent unhandled promise rejection if it fails after timeout
     const timeoutPromise = new Promise<void>((_, reject) => {
-      setTimeout(() => reject(new Error("Timeout")), 12000);
+      setTimeout(() => reject(new Error("Timeout")), 8000);
     });
     await Promise.race([deleteDocPromise, timeoutPromise]);
 
@@ -478,6 +529,12 @@ export async function deleteFirestoreDoc(collectionName: string, docId: string) 
     consecutiveFailures = 0;
   } catch (err: any) {
     if (handleBloomFilterFailure(err)) return;
+    
+    if (err && err.message === "Timeout") {
+      console.warn("⚠️ Firestore operation timed out. Reinitializing connection...");
+      reinitializeFirestore();
+      throw err;
+    }
     
     const now = Date.now();
     lastFailureTime = now;
@@ -497,53 +554,130 @@ export async function deleteFirestoreDoc(collectionName: string, docId: string) 
   }
 }
 
-export async function getFirestoreCollection(collectionName: string): Promise<any[]> {
+export async function _getFirestoreCollection(collectionName: string): Promise<any[]> {
   const db = getFirestoreInstance();
   if (!db || isFirestoreApiDisabled) return [];
   const resolved = resolveCollectionName(collectionName);
+  
+  const attemptFetch = async (targetCollection: string) => {
+    try {
+      const collRef = collection(db, targetCollection);
+      const getDocsPromise = getDocs(collRef);
+      getDocsPromise.catch(() => {});
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("Timeout")), 8000);
+      });
+      const snap = await Promise.race([getDocsPromise, timeoutPromise]);
+      
+      if (snap && !snap.empty) {
+        return snap.docs.map(d => {
+          const data = d.data();
+          return { ...data, code: data.code || d.id };
+        });
+      }
+      return [];
+    } catch (e) {
+      return [];
+    }
+  };
+
   try {
-    const collRef = collection(db, resolved);
+    // 1. Try the primary resolved collection
+    let results = await attemptFetch(resolved);
     
-    // Create a 12-second timeout to prevent startup/execution hang
-    const getDocsPromise = getDocs(collRef);
-    getDocsPromise.catch(() => {}); // prevent unhandled promise rejection if it fails after timeout
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error("Timeout")), 12000);
-    });
-    const snap = await Promise.race([getDocsPromise, timeoutPromise]);
-    
-    // Track read (1 call to getDocs is 1 read operation in simple billing, but effectively counting documents or metadata)
+    // 2. If it's the 'users' collection and we got nothing, try common fallbacks
+    if (results.length === 0 && (collectionName === "users" || collectionName === "app_users")) {
+      const env = getAppEnv();
+      const fallbacks = ["users", "app_users", `users_${env}`, `app_users_${env}`].filter(f => f !== resolved);
+      
+      for (const fallback of fallbacks) {
+        results = await attemptFetch(fallback);
+        if (results.length > 0) {
+          console.log(`💡 User Discovery: Found ${results.length} users in fallback collection: ${fallback}`);
+          break;
+        }
+      }
+    }
+
+    // Track operation
     import("./quotaService").then(({ QuotaService }) => {
       QuotaService.trackOperation(1, 0, 0, "sys", "System Generic Collection Read").catch(() => {});
     }).catch(() => {});
 
-    // Successful operation: reset consecutive failures counter
     consecutiveFailures = 0;
-    return snap.docs.map(d => {
-      const data = d.data();
-      return {
-        ...data,
-        code: data.code || d.id
-      };
-    });
+    return results;
   } catch (err: any) {
     if (handleBloomFilterFailure(err)) return [];
-    
+    // ... rest of the error handling logic
     const now = Date.now();
     lastFailureTime = now;
-
     if (isFirestoreErrorDisabled(err)) {
       isFirestoreApiBlockedByGoogle = true;
       isFirestoreApiDisabled = true;
-      console.warn("☁️ Firestore API is disabled or not activated. Operating in stable local Storage mode.");
     } else {
       consecutiveFailures++;
-      console.warn(`⚠️ Firestore operation failed (${consecutiveFailures}/${FAILURE_THRESHOLD}) on collection ${resolved}:`, err.message || err);
-      if (consecutiveFailures >= FAILURE_THRESHOLD) {
-        isFirestoreApiDisabled = true;
-        console.warn(`☁️ Firestore API auto-disabled (circuit breaker tripped) for stability after ${consecutiveFailures} consecutive errors.`);
-      }
     }
     return [];
+  }
+}
+
+
+// ==========================================
+// AUTO-RETRY WRAPPERS FOR ROBUSTNESS
+// ==========================================
+
+export async function getFirestoreDoc(collectionName: string, docId: string): Promise<any> {
+  let retries = 2;
+  while (retries >= 0) {
+    try {
+      return await _getFirestoreDoc(collectionName, docId);
+    } catch (err: any) {
+      if (retries === 0) throw err;
+      console.warn(`⚠️ Auto-retry getFirestoreDoc for ${docId} (${retries} left)`);
+      retries--;
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+}
+
+export async function setFirestoreDoc(collectionName: string, docId: string, data: any): Promise<void> {
+  let retries = 2;
+  while (retries >= 0) {
+    try {
+      return await _setFirestoreDoc(collectionName, docId, data);
+    } catch (err: any) {
+      if (retries === 0) throw err;
+      console.warn(`⚠️ Auto-retry setFirestoreDoc for ${docId} (${retries} left)`);
+      retries--;
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+}
+
+export async function deleteFirestoreDoc(collectionName: string, docId: string): Promise<void> {
+  let retries = 2;
+  while (retries >= 0) {
+    try {
+      return await _deleteFirestoreDoc(collectionName, docId);
+    } catch (err: any) {
+      if (retries === 0) throw err;
+      console.warn(`⚠️ Auto-retry deleteFirestoreDoc for ${docId} (${retries} left)`);
+      retries--;
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+}
+
+export async function getFirestoreCollection(collectionName: string): Promise<any[]> {
+  let retries = 2;
+  while (retries >= 0) {
+    try {
+      return await _getFirestoreCollection(collectionName);
+    } catch (err: any) {
+      if (retries === 0) throw err;
+      console.warn(`⚠️ Auto-retry getFirestoreCollection for ${collectionName} (${retries} left)`);
+      retries--;
+      await new Promise(r => setTimeout(r, 1000));
+    }
   }
 }

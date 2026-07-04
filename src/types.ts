@@ -73,6 +73,7 @@ export interface AuditSession {
   archivedBy?: string; // Tracks the user code who completed/archived this session
   archivedAt?: string; // ISO timestamp of when it was completed
   isRestored?: boolean; // For restored session editing by manager only
+  assignmentsCommitted?: boolean; // Supervisor committed assignments to server
   updatedAt?: number; // Client-side or server-side sync tracker
   modifications?: { modifiedBy: string; modifiedAt: string; itemChanges: { itemName: string; oldQty: number | null; newQty: number | null }[] }[]; // Edits history
 }

@@ -6,6 +6,31 @@ import bcrypt from "bcryptjs";
 import fs from "fs";
 import path from "path";
 
+function mergeStorekeeperModifications(existing: any[] | undefined, incoming: any[] | undefined): any[] {
+  const existingList = Array.isArray(existing) ? existing : [];
+  const incomingList = Array.isArray(incoming) ? incoming : [];
+  
+  const mergedMap = new Map<string, any>();
+  
+  existingList.forEach((mod: any) => {
+    if (!mod) return;
+    const key = `${mod.modifiedBy || ''}_${mod.modifiedAt || ''}_${mod.oldQty}_${mod.newQty}`;
+    mergedMap.set(key, mod);
+  });
+  
+  incomingList.forEach((mod: any) => {
+    if (!mod) return;
+    const key = `${mod.modifiedBy || ''}_${mod.modifiedAt || ''}_${mod.oldQty}_${mod.newQty}`;
+    mergedMap.set(key, mod);
+  });
+  
+  return Array.from(mergedMap.values()).sort((a, b) => {
+    const timeA = new Date(a.modifiedAt || 0).getTime();
+    const timeB = new Date(b.modifiedAt || 0).getTime();
+    return timeA - timeB;
+  });
+}
+
 export class SessionService {
   // Read and compile entire application state object for total client compatibility (Safe: No passwords leaked)
   public static getState() {
@@ -295,7 +320,7 @@ export class SessionService {
                       ...existingItem,
                       physicalQty: incomingItem.physicalQty !== undefined ? incomingItem.physicalQty : existingItem.physicalQty,
                       storekeeperQty: incomingItem.storekeeperQty !== undefined ? incomingItem.storekeeperQty : existingItem.storekeeperQty,
-                      storekeeperModifications: incomingItem.storekeeperModifications !== undefined ? incomingItem.storekeeperModifications : existingItem.storekeeperModifications,
+                      storekeeperModifications: mergeStorekeeperModifications(existingItem.storekeeperModifications, incomingItem.storekeeperModifications),
                       recheckRequested: incomingItem.recheckRequested !== undefined ? incomingItem.recheckRequested : existingItem.recheckRequested,
                       calculatorDetails: incomingItem.calculatorDetails || existingItem.calculatorDetails, 
                       notes: incomingItem.notes || existingItem.notes,
@@ -320,7 +345,7 @@ export class SessionService {
                   assignedTo: incomingItem.assignedTo !== undefined ? incomingItem.assignedTo : existingItem.assignedTo,
                   supervisorQty: incomingItem.supervisorQty !== undefined ? incomingItem.supervisorQty : existingItem.supervisorQty,
                   physicalQty: incomingItem.physicalQty !== undefined ? incomingItem.physicalQty : existingItem.physicalQty,
-                  storekeeperModifications: incomingItem.storekeeperModifications !== undefined ? incomingItem.storekeeperModifications : existingItem.storekeeperModifications,
+                  storekeeperModifications: mergeStorekeeperModifications(existingItem.storekeeperModifications, incomingItem.storekeeperModifications),
                   recheckRequested: incomingItem.recheckRequested !== undefined ? incomingItem.recheckRequested : existingItem.recheckRequested,
                   calculatorDetails: incomingItem.calculatorDetails || existingItem.calculatorDetails, 
                   notes: incomingItem.notes || existingItem.notes,
@@ -343,7 +368,9 @@ export class SessionService {
                 if (existingItem) {
                   const mergedItem = {
                     ...existingItem,
-                    ...incomingItem
+                    ...incomingItem,
+                    storekeeperQty: (existingItem.storekeeperQty !== undefined && existingItem.storekeeperQty !== null) ? existingItem.storekeeperQty : incomingItem.storekeeperQty,
+                    storekeeperModifications: mergeStorekeeperModifications(existingItem.storekeeperModifications, incomingItem.storekeeperModifications)
                   };
 
                   // 🛡️ CRITICAL ADMIN STALENESS GATES:

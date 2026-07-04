@@ -960,12 +960,35 @@ router.get("/diagnose", async (req, res) => {
 
     // Check Cloud counts if available
     let cloudUsersCountStatus = "Unknown";
+    let foundInCollection = "None";
     try {
       const firestoreDB = getFirestoreDB();
       if (firestoreDB) {
         const { collection, getDocs } = await import("firebase/firestore");
-        const snap = await getDocs(collection(firestoreDB, resolvedUsersCollection));
-        cloudUsersCountStatus = snap ? `${snap.size} users` : "Empty";
+        const env = getAppEnv();
+        const userCollectionsToTry = [`users_${env}`, "users", "app_users", `app_users_${env}`];
+        
+        let found = false;
+        for (const collName of userCollectionsToTry) {
+          try {
+            const snap = await getDocs(collection(firestoreDB, collName));
+            if (snap && !snap.empty) {
+              cloudUsersCountStatus = `${snap.size} users`;
+              foundInCollection = collName;
+              found = true;
+              break;
+            } else if (snap && snap.empty) {
+               if (foundInCollection === "None") {
+                 cloudUsersCountStatus = "0 users (Empty)";
+                 foundInCollection = collName;
+               }
+            }
+          } catch (e) {}
+        }
+        
+        if (!found && foundInCollection === "None") {
+          cloudUsersCountStatus = "Empty (Checked all variants)";
+        }
       } else {
         cloudUsersCountStatus = "No Firestore DB Instance";
       }
@@ -984,6 +1007,7 @@ router.get("/diagnose", async (req, res) => {
         localUsersCount,
         localItemsCount,
         cloudUsersCountStatus,
+        foundInCollection,
       }
     });
   } catch (err: any) {

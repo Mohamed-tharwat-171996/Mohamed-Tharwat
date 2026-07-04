@@ -4,7 +4,7 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { dbService } from "../database/dbService";
 import { getFirestoreDB, FirebaseBackupService } from "../services/firebaseBackupService";
-import { getFirestoreApiDisabled, setFirestoreApiDisabled, isFirestoreErrorDisabled, getFirestoreDoc, setFirestoreDoc, resolveCollectionName, getEnvSecret, getAppEnv, isFirestoreConfigured } from "../services/firestoreService";
+import { getFirestoreApiDisabled, setFirestoreApiDisabled, isFirestoreErrorDisabled, getFirestoreDoc, setFirestoreDoc, resolveCollectionName, getEnvSecret, getAppEnv, isFirestoreConfigured, reinitializeFirestore } from "../services/firestoreService";
 
 let cachedSecrets: Record<string, string> = {};
 
@@ -146,19 +146,31 @@ export class AuthService {
     let dbUser = null;
 
     // Query Firestore strictly - completely separated from SQLite, live directly to Firestore only
-    try {
-      const resolvedColl = resolveCollectionName("users");
-      console.log(`🔐 Login attempt for [${codeClean}] in collection: ${resolvedColl}`);
-      dbUser = await getFirestoreDoc("users", codeClean);
-      if (!dbUser && codeClean === "18") {
-        console.log("🔒 Master account 18 missing in Firestore during login. Re-seeding securely...");
-        const { FirebaseBackupService } = await import("../services/firebaseBackupService");
-        await FirebaseBackupService.ensureDefaultGMInCloud();
-        dbUser = await getFirestoreDoc("users", "18");
+    let retries = 3;
+    let lastErr = null;
+    while (retries > 0) {
+      try {
+        reinitializeFirestore(); // Force instant automated reconnection bypass
+        const resolvedColl = resolveCollectionName("users");
+        console.log(`🔐 Login attempt for [${codeClean}] in collection: ${resolvedColl}`);
+        dbUser = await getFirestoreDoc("users", codeClean);
+        if (!dbUser && codeClean === "18") {
+          console.log("🔒 Master account 18 missing in Firestore during login. Re-seeding securely...");
+          const { FirebaseBackupService } = await import("../services/firebaseBackupService");
+          await FirebaseBackupService.ensureDefaultGMInCloud();
+          dbUser = await getFirestoreDoc("users", "18");
+        }
+        break; // Success, exit retry loop
+      } catch (err: any) {
+        lastErr = err;
+        console.warn(`⚠️ Firestore lookup failed for ${codeClean}. Retrying... (${retries - 1} left)`);
+        retries--;
+        if (retries === 0) {
+          console.error(`🛑 Firestore lookup permanently failed for ${codeClean}:`, err.message || err);
+          throw new Error("فشل الاتصال بقاعدة بيانات الفايرستور السحابية لتسجيل الدخول.");
+        }
+        await new Promise(resolve => setTimeout(resolve, 1500)); // wait 1.5s before retry
       }
-    } catch (err: any) {
-      console.error(`🛑 Firestore lookup failed for ${codeClean}:`, err.message || err);
-      throw new Error("فشل الاتصال بقاعدة بيانات الفايرستور السحابية لتسجيل الدخول.");
     }
 
     if (!dbUser) {

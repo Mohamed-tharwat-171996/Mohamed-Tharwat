@@ -41,8 +41,21 @@ export class DatabaseService {
   private getDb(env: string = getAppEnv()): Database.Database {
     let db = this.dbs.get(env);
     if (!db) {
-      const dbPath = path.join(process.cwd(), `inventory_${env}.db`);
-      console.log(`🔌 Connecting to isolated SQLite database for [${env.toUpperCase()}]: ${dbPath}`);
+      const projectId = "ai-studio-00951ae3-ee45-4ad1-ad2a-6733dde9830e";
+      const oldDbPath = path.join(process.cwd(), `inventory_${env}.db`);
+      const dbPath = path.join(process.cwd(), `inventory_${projectId}_${env}.db`);
+      
+      // Auto-migrate: If old database exists but new one doesn't, rename it
+      if (fs.existsSync(oldDbPath) && !fs.existsSync(dbPath)) {
+        console.log(`📦 Universal Naming: Migrating legacy SQLite ${env} database to project-aware path...`);
+        try {
+          fs.renameSync(oldDbPath, dbPath);
+        } catch (err) {
+          console.warn(`⚠️ Failed to rename legacy database:`, err);
+        }
+      }
+
+      console.log(`🔌 Connecting to isolated SQLite database for [${env.toUpperCase()}] at address [${projectId}]: ${dbPath}`);
       db = new Database(dbPath);
 
       // ✅ Add WAL mode and optimized settings for ephemeral container storage

@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { offlineService } from "./lib/offlineSync";
 import { motion, AnimatePresence } from "motion/react";
+import * as XLSX from "xlsx";
 
 // @ts-ignore
 import alEmanLogoImg from "./assets/images/al_eman_logo_new_1779919375634.png";
@@ -562,6 +563,34 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
+  // Real-time server pull polling (every 8 seconds) to sync storekeeper submissions and live updates instantly without stale closures!
+  const pullCallbackRef = useRef<() => void>();
+  pullCallbackRef.current = () => {
+    const hasPending = localStorage.getItem("inventory_has_pending_assignments") === "true";
+    const hasUnsaved = localStorage.getItem("inventory_has_unsaved_changes") === "true";
+    
+    // If the user has unsaved draft changes on their screen, we protect their local draft and skip background fetching.
+    if (hasPending || hasUnsaved) {
+      console.log("🛡️ Polling pull skipped: local unsaved modifications are active on this device.");
+      return;
+    }
+
+    // Fetch the latest state from server (with forceUpdate=false so it does a smart, clean merge)
+    fetchStateFromServer(false);
+  };
+
+  useEffect(() => {
+    if (!user) return;
+
+    const pullInterval = setInterval(() => {
+      if (pullCallbackRef.current) {
+        pullCallbackRef.current();
+      }
+    }, 8000); // Poll every 8 seconds
+
+    return () => clearInterval(pullInterval);
+  }, [user]);
+
   // Initial Sync from IndexedDB on startup
   useEffect(() => {
     const checkQueue = async () => {
@@ -1062,6 +1091,14 @@ export default function App() {
         if (isAlreadyArchived) {
           console.warn(`🛡️ Security Warning: Server sent an activeSession (${sActiveClean.id}) that is already archived. Rejecting parameter.`);
           sActiveClean = null;
+        } else {
+          // Backward compatibility: if the session contains assigned items, treat assignments as committed
+          if (sActiveClean.assignmentsCommitted === undefined) {
+            const hasAssigned = sActiveClean.items?.some((i: any) => i.assignedTo && i.assignedTo !== "عام" && i.assignedTo !== "general");
+            if (hasAssigned) {
+              sActiveClean.assignmentsCommitted = true;
+            }
+          }
         }
       }
       
@@ -1307,6 +1344,9 @@ export default function App() {
   // Helper to pull from server & update states safely
   const fetchStateFromServer = async (forceUpdate = false) => {
     if (isArchiving) return;
+    if (forceUpdate) {
+      setIsDataLoaded(false);
+    }
     try {
       if (typeof window !== "undefined" && !navigator.onLine) {
         setIsDataLoaded(true);
@@ -2126,6 +2166,7 @@ export default function App() {
 
   const performLogout = (saveChoice?: "local" | "none") => {
     setUser(null);
+    setIsDataLoaded(false);
     
     // Always clear session-specific and metadata keys on logout to ensure absolute isolation for shared devices
     localStorage.removeItem("inventory_logged_in_user");
@@ -2156,8 +2197,8 @@ export default function App() {
       showToast("⚠️ يرجى الانتظار حتى اكتمال عملية الحفظ والأرشفة.", "info");
       return;
     }
-    const isAdminOrManager = user && ["general_manager", "system_admin", "super_admin", "program_manager"].includes(user.role);
-    if (isAdminOrManager || (!hasUnsavedChanges && !hasPendingAssignments)) {
+    const isStorekeeper = user && user.role === "storekeeper";
+    if (!isStorekeeper || (!hasUnsavedChanges && !hasPendingAssignments)) {
       setShowStandardLogoutConfirm(true);
     } else {
       setPendingLogoutWithUnsaved(true);
@@ -2543,6 +2584,7 @@ export default function App() {
           inventoriedByName: numVal !== null ? (user?.name || prevName) : prevName,
           inventoriedAt: numVal !== null ? new Date().toISOString() : prevAt,
           ...(isStorekeeper ? { 
+            storekeeperQty: numVal,
             supervisorQty: null,
             managerQty: null
           } : {}),
@@ -2597,6 +2639,7 @@ export default function App() {
           inventoriedAt: new Date().toISOString(),
           storekeeperModifications: item.storekeeperModifications || [],
           ...(isStorekeeper ? { 
+            storekeeperQty: calculatedQty,
             supervisorQty: null,
             managerQty: null
           } : {}),
@@ -2619,10 +2662,13 @@ export default function App() {
       localStorage.setItem(`inventory_draft_sess_${activeSession.id}_user_${user.code}`, JSON.stringify(updatedItems));
     }
 
-    // Zero-Latency Multi-User Real-time Sync push:
-    pushStateToServer({ activeSession: updatedSession }, { isExplicitAction: true });
-
-    showToast(`تم قياس وحفظ الكمية للصنف عبر الحاسبة بنجاح: ${calculatedQty} كجم 👍`, "success");
+    if (!isSupervisor) {
+      // Zero-Latency Multi-User Real-time Sync push:
+      pushStateToServer({ activeSession: updatedSession }, { isExplicitAction: true });
+      showToast(`تم قياس وحفظ الكمية للصنف عبر الحاسبة بنجاح: ${calculatedQty} كجم 👍`, "success");
+    } else {
+      showToast(`💾 تم قياس وحفظ الكمية للصنف عبر الحاسبة بنجاح: ${calculatedQty} كجم! (التعديل محفوظ مؤقتاً ومحلياً، اضغط على زر الحفظ والاعتماد بالأعلى لترحيله)`, "success", 6000);
+    }
   };
 
   const handleNotesChange = (txt: string) => {
@@ -2881,21 +2927,14 @@ export default function App() {
       supervisorApproved: false // Ensure active session cannot be approved if some items are pending re-inventory
     };
 
-    saveActiveSession(updatedSession);
+    saveActiveSession(updatedSession, true);
     
     // Auto-update user-specific local drafts on the device too!
     if (user?.code) {
       localStorage.setItem(`inventory_draft_sess_${activeSession.id}_user_${user.code}`, JSON.stringify(updatedItems));
     }
 
-    try {
-      showToast("جاري ترحيل طلب إعادة الجرد للسيرفر سحابياً...", "info");
-      await pushStateToServer({ activeSession: updatedSession }, { isExplicitAction: true });
-      showToast(`🔄 تم طلب إعادة جرد الصنف [ ${targetItem.itemName} ] بنجاح من الأمين!`, "success");
-    } catch (err: any) {
-      console.error("Error setting recheck request:", err);
-      showToast(`⚠️ فشل الترحيل السحابي: ${err.message || "مشكلة اتصال/شبكة"}`, "error");
-    }
+    showToast(`🔄 تم جدولة طلب إعادة جرد الصنف [ ${targetItem.itemName} ]! يرجى الضغط على زر 'حفظ التعديلات والاعتماد الفوري 💾' بالأعلى لإرسال الطلب للأمين سحابياً.`, "success", 7000);
   };
 
   const handleProgramManagerSave = async () => {
@@ -2927,12 +2966,25 @@ export default function App() {
   const handleSupervisorSaveOrCommit = async () => {
     if (!activeSession) return;
     try {
-      showToast("جاري حفظ التعديلات وتحديث الإسناد الفوري...", "info");
-      const updatedSess = { ...activeSession, updatedAt: Date.now() };
+      const isAlreadyAssigned = !!activeSession.assignmentsCommitted;
+      const actionMsg = isAlreadyAssigned 
+        ? "جاري حفظ وتثبيت التعديلات والاعتماد سحابياً..." 
+        : "جاري حفظ وإرسال الإسناد للأمناء وتفعيله سحابياً...";
+      
+      showToast(actionMsg, "info");
+      
+      const updatedSess = { 
+        ...activeSession, 
+        assignmentsCommitted: true, 
+        updatedAt: Date.now() 
+      };
       
       // Explicitly push activeSession to server and sync database
       await pushStateToServer({ activeSession: updatedSess }, { isExplicitAction: true });
       
+      // Update local state and clear unsaved state
+      saveActiveSession(updatedSess, false);
+
       // Clear both flags
       localStorage.removeItem("inventory_has_pending_assignments");
       setHasPendingAssignments(false);
@@ -2940,7 +2992,11 @@ export default function App() {
       localStorage.removeItem("inventory_has_unsaved_changes");
       setHasUnsavedChangesState(false);
       
-      showToast("🚀 تم حفظ التعديلات وتحديث الإسنادات بنجاح وتعميمها للأمناء!", "success");
+      const successMsg = isAlreadyAssigned
+        ? "💾 تم حفظ التعديلات والاعتماد الفوري بنجاح تام وتثبيتها سحابياً!"
+        : "🚀 تم حفظ وإرسال إسناد الأصناف للأمناء بنجاح! الجرد متاح لديهم الآن.";
+      
+      showToast(successMsg, "success");
     } catch (err) {
       console.error("Error committing supervisor save/assignments:", err);
       showToast("⚠️ فشل ترحيل التعديلات والإسناد. يرجى التأكد من الشبكة.", "error");
@@ -3094,29 +3150,29 @@ export default function App() {
       supervisorApprovedBy: user?.name || "المشرف"
     };
 
-    saveActiveSession(updatedSession, false); // save local with markAsUnsaved=false
-    
     try {
-      showToast("جاري ترحيل وحفظ الاعتماد...", "info");
-      // Explicit SQLite save and server push
-      await pushStateToServer({ activeSession: updatedSession }, { isExplicitAction: true });
+      showToast("جاري حفظ وتثبيت اعتماد الجرد سحابياً...", "info");
       
-      // Successfully pushed! Clean any unsaved changes flags definitely
+      // Save locally (clearing unsaved flags)
+      saveActiveSession(updatedSession, false);
+      
+      // Clear both flags
+      localStorage.removeItem("inventory_has_pending_assignments");
+      setHasPendingAssignments(false);
       localStorage.removeItem("inventory_has_unsaved_changes");
       setHasUnsavedChangesState(false);
       
-      showToast("✅ تم مراجعة واعتماد جرد المخازن بنجاح! الملف بانتظار الاعتماد النهائي من مسئول البرنامج.", "success");
+      // Push immediately to the server
+      await pushStateToServer({ activeSession: updatedSession }, { isExplicitAction: true });
+      
+      showToast("🤝 تم اعتماد جرد الوردية بنجاح وتثبيت وحفظ البيانات سحابياً!", "success");
     } catch (err: any) {
       console.error("Error approving supervisor session:", err);
-      if (err.message === "SUPERVISOR_APPROVAL_BLOCKED_UNSUBMITTED") {
-        showToast("⚠️ فشل الاعتماد: توجد أصناف لم يتم تسليمها من الأمناء على السيرفر سيعاد التحميل الآن.", "error");
-        fetchStateFromServer(true);
-      } else {
-        // Revert/restore the unsaved changes flags on failure so they can retry
-        localStorage.setItem("inventory_has_unsaved_changes", "true");
-        setHasUnsavedChangesState(true);
-        showToast(`⚠️ فشل ترحيل الاعتماد للسيرفر: ${err.message || 'مشكلة في الشبكة'}`, "error");
-      }
+      // Revert/restore local flags so they can retry saving
+      saveActiveSession(updatedSession, true);
+      localStorage.setItem("inventory_has_unsaved_changes", "true");
+      setHasUnsavedChangesState(true);
+      showToast(`⚠️ فشل ترحيل الاعتماد للسيرفر: ${err.message || "مشكلة في الاتصال"}`, "error");
     }
   };
 
@@ -3129,8 +3185,8 @@ export default function App() {
       }
       return item;
     });
-    saveActiveSession({ ...activeSession, items: updatedItems });
-    showToast("تم فك قفل الصنف وإعادته لحالة الانتظار ليقوم الأمين بتصحيحه.", "info");
+    saveActiveSession({ ...activeSession, items: updatedItems }, true);
+    showToast("🔓 تم فك قفل الصنف وإعادته لحالة الانتظار محلياً! يرجى الضغط على زر الحفظ والاعتماد بالأعلى لإرسال التحديث للأمين سحابياً.", "success", 7000);
   };
 
   // Helper for Program Manager to finalize and archive
@@ -3282,42 +3338,76 @@ export default function App() {
     }
   };
 
-  // Export CSV helper
+  // Export Excel (.xlsx) helper with full details
   const handleExportCsv = (session: AuditSession, filename: string) => {
-    let csvContent = "\uFEFF"; // UTF-8 BOM
-    
-    // Add meta descriptive lines at the top of the report
-    const overallStorekeeper = session.storekeeperCode !== undefined ? getStorekeeperName(session.storekeeperCode, user) : "غير محدد";
-    csvContent += `# تقرير جرد ومطابقة أرصدة مستودعات الإيمان للأعلاف\n`;
-    csvContent += `# تاريخ الجلسة الأساسي: ${new Date(session.archivedAt || session.updatedAt || session.date).toLocaleDateString("ar-EG")}\n`;
-    csvContent += `# وقت الأرشفة النهائي: ${new Date(session.archivedAt || session.updatedAt || session.date).toLocaleTimeString("ar-EG")}\n`;
-    csvContent += `# أمين المخزن الرئيسي المعين للجلسة: ${overallStorekeeper}\n`;
-    csvContent += `\n`;
-    
-    // Write descriptive table column headers in Arabic
-    csvContent += "الباركود,اسم الصنف,القسم التجاري,الكمية الدفترية,الكمية الفعلية (المعتمدة),الفرق (العجز والزيادة),الفرق السابق,الوحدة,أمين المخزن المسؤول عن الصنف,القائم بالجرد الفعلي,تاريخ ووقت الجرد\n";
-
-    (session.items || []).forEach((item) => {
-      const pQty = session.isCompleted ? getRoleBasedPhysicalQty(item, user?.role) : item.physicalQty;
-      const physicalStr = pQty !== null ? pQty : "لم يجرد";
-      const diffStr = pQty !== null ? pQty - item.bookQty : "—";
-      const prevDiffVal = item.previousDiff !== undefined ? item.previousDiff : "—";
+    try {
+      const overallStorekeeper = session.storekeeperCode !== undefined ? getStorekeeperName(session.storekeeperCode, user) : "غير محدد";
       
-      const assignedSK = item.assignedTo ? getStorekeeperName(item.assignedTo, user) : overallStorekeeper;
-      const inventoriedBy = item.inventoriedByName || "—";
-      const inventoriedTime = item.inventoriedAt ? new Date(item.inventoriedAt).toLocaleString("ar-EG") : "—";
+      const rows = (session.items || []).map((item) => {
+        const pQty = session.isCompleted ? getRoleBasedPhysicalQty(item, user?.role) : item.physicalQty;
+        const finalDiff = pQty !== null ? pQty - item.bookQty : null;
+        
+        // Detailed Recounts History for this item
+        const skMods = item.storekeeperModifications || [];
+        const modsText = skMods.map((mod: any, idx: number) => {
+          const modTime = mod.modifiedAt ? new Date(mod.modifiedAt).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" }) : "";
+          const modDate = mod.modifiedAt ? new Date(mod.modifiedAt).toLocaleDateString("ar-EG") : "";
+          return `إعادة جرد ${idx + 1}: من ${mod.oldQty} إلى ${mod.newQty} بواسطة ${mod.modifiedByName || "الأمين"} في ${modDate} ${modTime}`;
+        }).join(" | ");
 
-      csvContent += `"${item.itemId}","${item.itemName.replace(/"/g, '""')}","${item.category || "عام"}",${item.bookQty},${physicalStr},${diffStr},${prevDiffVal},"${item.unit}","${assignedSK}","${inventoriedBy}","${inventoriedTime}"\n`;
-    });
+        return {
+          "كود الصنف": item.itemId,
+          "اسم الصنف": item.itemName,
+          "القسم التجاري": item.category || "عام",
+          "الوحدة": item.unit || "عدد",
+          "أمين المخزن المعين": item.assignedTo ? getStorekeeperName(item.assignedTo, user) : overallStorekeeper,
+          "الرصيد الدفتري": item.bookQty,
+          "جرد الأمين": item.storekeeperQty !== null && item.storekeeperQty !== undefined ? item.storekeeperQty : "-",
+          "جرد المشرف": item.supervisorQty !== null && item.supervisorQty !== undefined ? item.supervisorQty : "-",
+          "جرد المسئول": item.managerQty !== null && item.managerQty !== undefined ? item.managerQty : "-",
+          "الكمية الفعلية (المعتمدة)": pQty !== null ? pQty : "لم يجرد",
+          "الفرق النهائي": finalDiff !== null ? finalDiff : "—",
+          "الفرق السابق": item.previousDiff !== undefined ? item.previousDiff : "—",
+          "حالة الجرد": finalDiff === null ? "غير مجرد" : (finalDiff === 0 ? "مطابق" : (finalDiff > 0 ? `زيادة (+${finalDiff})` : `عجز (${finalDiff})`)),
+          "تعديلات وإعادات الجرد الفردية": modsText || "لا توجد تعديلات",
+          "القائم بالجرد النهائي": item.inventoriedByName || "—",
+          "تاريخ ووقت الجرد النهائي": item.inventoriedAt ? new Date(item.inventoriedAt).toLocaleString("ar-EG") : "—"
+        };
+      });
 
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute("download", filename);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+      const ws = XLSX.utils.json_to_sheet(rows);
+
+      // Set elegant column widths for Excel
+      const wscols = [
+        { wch: 15 }, // كود الصنف
+        { wch: 30 }, // اسم الصنف
+        { wch: 15 }, // القسم التجاري
+        { wch: 10 }, // الوحدة
+        { wch: 20 }, // أمين المخزن المعين
+        { wch: 15 }, // الرصيد الدفتري
+        { wch: 15 }, // جرد الأمين
+        { wch: 15 }, // جرد المشرف
+        { wch: 15 }, // جرد المسئول
+        { wch: 25 }, // الكمية الفعلية (المعتمدة)
+        { wch: 15 }, // الفرق النهائي
+        { wch: 15 }, // الفرق السابق
+        { wch: 15 }, // حالة الجرد
+        { wch: 60 }, // تعديلات وإعادات الجرد الفردية
+        { wch: 20 }, // القائم بالجرد النهائي
+        { wch: 25 }  // تاريخ ووقت الجرد النهائي
+      ];
+      ws['!cols'] = wscols;
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "تفاصيل الجلسة");
+      
+      const realFilename = filename.endsWith(".csv") ? filename.replace(".csv", ".xlsx") : filename;
+      XLSX.writeFile(wb, realFilename);
+      showToast("📥 تم تصدير تقرير Excel التفصيلي بنجاح!", "success");
+    } catch (error) {
+      console.error("Excel Session Export Error:", error);
+      showToast("❌ حدث خطأ أثناء تصدير ملف Excel التفصيلي", "error");
+    }
   };
 
   // Export full raw offline database backup (all sessions and items)
@@ -5353,6 +5443,7 @@ export default function App() {
           { deletedPastSessionId: sessionId, deletedReason: deletionReason, isExplicitAction: true }
         );
         
+        await performCloudSync(true, true);
         showToast("تم حذف الجرد من السجلات بنجاح.", "success");
       }
 
@@ -5430,6 +5521,18 @@ export default function App() {
     ((user.role === 'supervisor' || user.role === 'warehouse_supervisor' || user.role === 'stores_manager') && activeSupervisorTab === 'none') ||
     (user.role === 'storekeeper' && activeStorekeeperTab === 'none')
   );
+
+  if (user && !isDataLoaded) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6" dir="rtl">
+        <div className="text-center space-y-4">
+          <div className="w-16 h-16 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto"></div>
+          <h2 className="text-lg font-black text-slate-800">جاري تحميل البيانات ومزامنتها...</h2>
+          <p className="text-xs text-slate-500">يرجى الانتظار، جاري المزامنة مع خادم السحابة بأمان تام.</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`bg-slate-50 flex flex-col font-sans transition-all duration-300 min-h-screen`} dir="rtl">
@@ -5679,42 +5782,59 @@ export default function App() {
 
                         {(user.role === 'warehouse_supervisor' || user.role === 'supervisor') && activeSupervisorTab === 'sheet' && (() => {
                           const hasUnassignedOrGeneral = activeSession?.items.some(item => !item.assignedTo || item.assignedTo === "عام" || item.assignedTo === "general") || false;
-                          const assignDisabled = activeSession?.isCompleted || !hasPendingAssignments || hasUnassignedOrGeneral;
+                          const isAlreadyAssigned = !!activeSession?.assignmentsCommitted;
                           
+                          // The first button (Assign or Save Changes):
+                          // - If not assigned yet: acts as "إسناد 🚀" and is active if hasPendingAssignments is true.
+                          // - If already assigned: acts as "حفظ التعديلات 💾" and is active if hasUnsavedChanges or hasPendingAssignments is true.
+                          const saveButtonDisabled = activeSession?.isCompleted || 
+                            (isAlreadyAssigned 
+                              ? (!hasUnsavedChanges && !hasPendingAssignments) 
+                              : (!hasPendingAssignments || hasUnassignedOrGeneral)
+                            );
+                          
+                          const saveButtonLabel = isAlreadyAssigned ? "حفظ 💾" : "إسناد 🚀";
+                          const saveButtonTitle = isAlreadyAssigned 
+                            ? "حفظ التعديلات المعلقة والاعتمادات سحابياً على الخادم" 
+                            : (hasUnassignedOrGeneral ? "يجب إسناد كافة الأصناف لأمناء معينين أولاً (لا يمكن إبقاء صنف عام)" : "حفظ وتوزيع إسناد الأصناف للأمناء وتفعيل الجرد لديهم سحابياً");
+
                           const hasAssigned = activeSession?.items.some(item => item.assignedTo) || false;
                           const hasUnsubmitted = activeSession?.items.some(item => item.assignedTo && !item.submitted) || false;
                           
-                          // Supervisor interlock: allow "Save Edits" logic if already approved
+                          // The Approve button is strictly for initiating approval locally.
+                          // Disabled if not assigned yet, or if there are unsubmitted items, or if already approved.
                           const approveDisabled = activeSession?.isCompleted || 
+                            !isAlreadyAssigned ||
                             hasUnsubmitted || 
-                            (!activeSession?.supervisorApproved && (!hasAssigned || hasUnassignedOrGeneral || hasPendingAssignments)) ||
-                            (activeSession?.supervisorApproved && !hasUnsavedChanges);
+                            activeSession?.supervisorApproved ||
+                            !hasAssigned || 
+                            hasUnassignedOrGeneral;
                           
-                          const buttonLabel = activeSession?.supervisorApproved ? "حفظ التعديلات 💾" : "اعتماد الجرد 🤝";
-                          const buttonTitle = activeSession?.supervisorApproved 
-                            ? "حفظ التعديلات الفنية النهائية التي أجريتها على الجرد المعتمد" 
-                            : (hasPendingAssignments ? "يرجى أولاً الضغط على إسناد لتفعيل التعديلات" : hasUnassignedOrGeneral ? "يرجى إسناد كافة الأصناف لأمناء معينين أولاً" : hasUnsubmitted ? "بانتظار قيام كافة الأمناء بتسليم وحفظ الجرد الخاص بهم بالكامل أولاً" : "مراجعة واعتماد جرد الوردية نهائياً لترحيله لمسئول البرنامج");
+                          const approveButtonLabel = "اعتماد الجرد 🤝";
+                          const approveButtonTitle = activeSession?.supervisorApproved 
+                            ? "تم اعتماد الجرد بنجاح" 
+                            : (!isAlreadyAssigned ? "يجب أولاً إسناد الأصناف للأمناء وتفعيل الجرد" : hasUnsubmitted ? "بانتظار قيام كافة الأمناء بتسليم الجرد أولاً" : "اعتماد جرد الوردية ومطابقته ونقل التعديلات لزر الحفظ والتثبيت");
                           
                           return (
                             <div className="flex items-center gap-1.5" dir="rtl">
-                              {/* زر إسناد */}
+                              {/* زر الإسناد / حفظ التعديلات */}
                               <button
                                 type="button"
                                 id="supervisor-commit-assigns-btn"
                                 onClick={handleSupervisorSaveOrCommit}
-                                disabled={assignDisabled}
+                                disabled={saveButtonDisabled}
                                 className={"h-[26px] rounded-xl flex items-center justify-center gap-1 transition-all cursor-pointer px-2.5 " + (
-                                  assignDisabled
+                                  saveButtonDisabled
                                   ? "bg-slate-50 text-slate-400 border border-slate-200 cursor-not-allowed"
                                   : "bg-blue-600 hover:bg-blue-750 text-white animate-pulse active:scale-95 shadow-md shadow-blue-600/10"
                                 )}
-                                title={hasUnassignedOrGeneral ? "يجب إسناد كافة الأصناف لأمناء معينين أولاً (لا يمكن إبقاء صنف عام أو غير مسند)" : "حفظ وإرسال التعديلات وتحديث إسناد الأصناف للأمناء سحابياً"}
+                                title={saveButtonTitle}
                               >
                                 <Save className="w-3.5 h-3.5 shrink-0" />
-                                <span className="text-[10px] font-bold">إسناد 🚀</span>
+                                <span className="text-[10px] font-bold">{saveButtonLabel}</span>
                               </button>
 
-                              {/* زر اعتماد الجرد */}
+                              {/* زر اعتماد الجرد الفعلي */}
                               <button
                                 type="button"
                                 id="supervisor-approve-session-btn"
@@ -5725,10 +5845,10 @@ export default function App() {
                                   ? "bg-slate-50 text-slate-400 border border-slate-200 cursor-not-allowed"
                                   : "bg-emerald-600 hover:bg-emerald-750 text-white animate-pulse active:scale-95 shadow-md shadow-emerald-600/10"
                                 )}
-                                title={buttonTitle}
+                                title={approveButtonTitle}
                               >
                                 <CheckCircle className="w-3.5 h-3.5 shrink-0" />
-                                <span className="text-[10px] font-bold">{buttonLabel}</span>
+                                <span className="text-[10px] font-bold">{approveButtonLabel}</span>
                               </button>
                             </div>
                           );
@@ -6450,7 +6570,10 @@ export default function App() {
                                         onChange={(e) => handlePhysicalQtyChange(item.itemId, e.target.value)}
                                         onBlur={() => {
                                           if (activeSession) {
-                                            pushStateToServer({ activeSession }, { isExplicitAction: true });
+                                            const isSupervisor = user?.role === "warehouse_supervisor" || user?.role === "supervisor";
+                                            if (!isSupervisor) {
+                                              pushStateToServer({ activeSession }, { isExplicitAction: true });
+                                            }
                                           }
                                         }}
                                         onKeyDown={(e) => handleKeyDown(e, item.itemId, idx, visibleWorksheetItems)}
@@ -6686,16 +6809,28 @@ export default function App() {
                       <button
                         type="button"
                         onClick={handleSupervisorSaveOrCommit}
-                        disabled={activeSession?.isCompleted || (!hasPendingAssignments && !hasUnsavedChanges)}
+                        disabled={
+                          activeSession?.isCompleted || 
+                          (activeSession?.assignmentsCommitted 
+                            ? (!hasUnsavedChanges && !hasPendingAssignments) 
+                            : !hasPendingAssignments
+                          )
+                        }
                         className={`w-full font-extrabold text-xs py-3 rounded-xl flex items-center justify-center gap-1.5 border-0 transition-all shadow-md ${
-                          (activeSession?.isCompleted || (!hasPendingAssignments && !hasUnsavedChanges))
+                          (activeSession?.isCompleted || (activeSession?.assignmentsCommitted ? (!hasUnsavedChanges && !hasPendingAssignments) : !hasPendingAssignments))
                             ? "bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none"
                             : "bg-blue-600 hover:bg-blue-700 text-white cursor-pointer active:scale-95 shadow-blue-600/10"
                         }`}
-                        title="حفظ تعديلات إسناد الأصناف للأمناء وترحيلها سحابياً"
+                        title={
+                          activeSession?.assignmentsCommitted
+                            ? "حفظ التعديلات المعلقة والاعتمادات سحابياً على الخادم"
+                            : "حفظ وتوزيع إسناد الأصناف للأمناء وتفعيل الجرد لديهم سحابياً"
+                        }
                       >
                         <Save className="w-4 h-4" />
-                        حفظ وإرسال الإسناد للأمناء
+                        {activeSession?.assignmentsCommitted
+                          ? "حفظ 💾"
+                          : "إسناد الأصناف للأمناء 🚀"}
                       </button>
 
                       <button
@@ -6703,24 +6838,30 @@ export default function App() {
                         onClick={handleSupervisorApproveSession}
                         disabled={
                           activeSession?.isCompleted || 
-                          (activeSession?.supervisorApproved && !activeSession?.items.some(item => item.assignedTo && !item.submitted)) || 
+                          !activeSession?.assignmentsCommitted ||
+                          activeSession?.supervisorApproved || 
                           !activeSession?.items.some(item => item.assignedTo) || 
                           activeSession?.items.some(item => item.assignedTo && !item.submitted)
                         }
                         className={`w-full font-extrabold text-xs py-3 rounded-xl flex items-center justify-center gap-1.5 border-0 transition-all shadow-md ${
                           (
                             activeSession?.isCompleted || 
-                            (activeSession?.supervisorApproved && !activeSession?.items.some(item => item.assignedTo && !item.submitted)) || 
+                            !activeSession?.assignmentsCommitted ||
+                            activeSession?.supervisorApproved || 
                             !activeSession?.items.some(item => item.assignedTo) || 
                             activeSession?.items.some(item => item.assignedTo && !item.submitted)
                           )
                             ? "bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none"
                             : "bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer active:scale-95 shadow-emerald-600/10"
                         }`}
-                        title="اعتماد جرد الوردية بعد تسليم كافة الأمناء"
+                        title={
+                          activeSession?.supervisorApproved
+                            ? "تم اعتماد الجرد بنجاح"
+                            : "اعتماد جرد الوردية بعد تسليم كافة الأمناء ومطابقة الكميات"
+                        }
                       >
                         <CheckCircle className="w-4 h-4" />
-                        اعتماد جرد الوردية 🤝
+                        {activeSession?.supervisorApproved ? "تم اعتماد جرد الوردية بنجاح 👍" : "اعتماد جرد الوردية 🤝"}
                       </button>
                     </div>
                   </div>
