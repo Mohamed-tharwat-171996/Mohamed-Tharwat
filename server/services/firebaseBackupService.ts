@@ -81,13 +81,11 @@ export function getFirestoreDB(force = false): any {
     enableCloudBackup();
     reinitializeFirestore();
   }
-  if (getFirestoreApiDisabled()) return null;
   if (cloudBackupDisabled && !force) return null;
   
   const db = getFirestoreInstance();
   if (!db) {
     console.warn("⚠️ Firestore is not initialized in firestoreService (Config likely missing or invalid).");
-    if (!force) cloudBackupDisabled = true;
     return null;
   }
   return db;

@@ -201,28 +201,8 @@ export function getFirestoreInstance(): Firestore | null {
       }
       
       // Dynamic Database ID resolution
-      let databaseId = freshConfig.firestoreDatabaseId || freshConfig.databaseId;
-      if (!databaseId || databaseId === "(default)") {
-        try {
-          const fbJsonPath = path.join(process.cwd(), 'firebase.json');
-          if (fs.existsSync(fbJsonPath)) {
-            const fbJson = JSON.parse(fs.readFileSync(fbJsonPath, 'utf-8'));
-            if (fbJson?.firestore?.database) {
-              databaseId = fbJson.firestore.database;
-              console.log(`🎯 Dynamically resolved custom database ID from firebase.json: ${databaseId}`);
-            }
-          }
-        } catch (e) {
-          console.warn("⚠️ Failed to parse firebase.json for database ID:", e);
-        }
-      }
-      if (!databaseId || databaseId === "(default)") {
-        databaseId = "ai-studio-00951ae3-ee45-4ad1-ad2a-6733dde9830e";
-      }
-
-      // 🛡️ USER OVERRIDE: The user explicitly confirmed this database ID contains their data
-      databaseId = "ai-studio-00951ae3-ee45-4ad1-ad2a-6733dde9830e";
-
+      let databaseId = "ai-studio-00951ae3-ee45-4ad1-ad2a-6733dde9830e";
+      
       try {
         // Try getFirestore first - often more stable in Node.js environments regarding internal filters/caches
         const innerDb = getFirestore(app, databaseId);
@@ -436,13 +416,10 @@ export async function _getFirestoreDoc(collectionName: string, docId: string): P
       isFirestoreApiDisabled = true;
       console.warn("☁️ Firestore API is disabled or not activated. Operating in stable local Storage mode.");
     } else {
-      consecutiveFailures++;
-      console.warn(`⚠️ Firestore operation failed (${consecutiveFailures}/${FAILURE_THRESHOLD}) on doc ${resolved}/${docId}:`, err.message || err);
-      if (consecutiveFailures >= FAILURE_THRESHOLD) {
-        isFirestoreApiDisabled = true;
-        console.warn(`☁️ Firestore API auto-disabled (circuit breaker tripped) for stability after ${consecutiveFailures} consecutive errors.`);
-      }
-      throw err; // explicitly throw network errors so callers don't mistake them for missing documents
+      // For all other errors (timeout, network, etc), just reinitialize and throw, but DO NOT DISABLE
+      console.warn(`⚠️ Firestore operation failed on doc ${resolved}/${docId}: ${err.message || err}. Reinitializing for stability...`);
+      reinitializeFirestore();
+      throw err;
     }
     return null;
   }
@@ -495,12 +472,10 @@ export async function _setFirestoreDoc(collectionName: string, docId: string, da
       isFirestoreApiDisabled = true;
       console.warn("☁️ Firestore API is disabled or not activated. Operating in stable local Storage mode.");
     } else {
-      consecutiveFailures++;
-      console.warn(`⚠️ Firestore operation failed (${consecutiveFailures}/${FAILURE_THRESHOLD}) on set doc ${resolved}/${docId}:`, err.message || err);
-      if (consecutiveFailures >= FAILURE_THRESHOLD) {
-        isFirestoreApiDisabled = true;
-        console.warn(`☁️ Firestore API auto-disabled (circuit breaker tripped) for stability after ${consecutiveFailures} consecutive errors.`);
-      }
+      // For all other errors (timeout, network, etc), just reinitialize and throw, but DO NOT DISABLE
+      console.warn(`⚠️ Firestore operation failed on set doc ${resolved}/${docId}: ${err.message || err}. Reinitializing for stability...`);
+      reinitializeFirestore();
+      throw err;
     }
   }
 }
@@ -544,12 +519,10 @@ export async function _deleteFirestoreDoc(collectionName: string, docId: string)
       isFirestoreApiDisabled = true;
       console.warn("☁️ Firestore API is disabled or not activated. Operating in stable local Storage mode.");
     } else {
-      consecutiveFailures++;
-      console.warn(`⚠️ Firestore operation failed (${consecutiveFailures}/${FAILURE_THRESHOLD}) on delete doc ${resolved}/${docId}:`, err.message || err);
-      if (consecutiveFailures >= FAILURE_THRESHOLD) {
-        isFirestoreApiDisabled = true;
-        console.warn(`☁️ Firestore API auto-disabled (circuit breaker tripped) for stability after ${consecutiveFailures} consecutive errors.`);
-      }
+      // For all other errors (timeout, network, etc), just reinitialize and throw, but DO NOT DISABLE
+      console.warn(`⚠️ Firestore operation failed on delete doc ${resolved}/${docId}: ${err.message || err}. Reinitializing for stability...`);
+      reinitializeFirestore();
+      throw err;
     }
   }
 }
@@ -608,14 +581,17 @@ export async function _getFirestoreCollection(collectionName: string): Promise<a
     return results;
   } catch (err: any) {
     if (handleBloomFilterFailure(err)) return [];
-    // ... rest of the error handling logic
+    
     const now = Date.now();
     lastFailureTime = now;
     if (isFirestoreErrorDisabled(err)) {
       isFirestoreApiBlockedByGoogle = true;
       isFirestoreApiDisabled = true;
+      console.warn("☁️ Firestore API is disabled or not activated. Operating in stable local Storage mode.");
     } else {
-      consecutiveFailures++;
+      // For all other errors (timeout, network, etc), just reinitialize but DO NOT DISABLE
+      console.warn(`⚠️ Firestore collection fetch failed: ${err.message || err}. Reinitializing for stability...`);
+      reinitializeFirestore();
     }
     return [];
   }

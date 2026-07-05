@@ -167,9 +167,22 @@ export class AuthService {
         retries--;
         if (retries === 0) {
           console.error(`🛑 Firestore lookup permanently failed for ${codeClean}:`, err.message || err);
-          throw new Error("فشل الاتصال بقاعدة بيانات الفايرستور السحابية لتسجيل الدخول.");
+          break; // Exit loop to allow SQLite fallback below
         }
         await new Promise(resolve => setTimeout(resolve, 1500)); // wait 1.5s before retry
+      }
+    }
+
+    // SQLite fallback if Firestore unavailable
+    if (!dbUser) {
+      try {
+        const localUser = dbService.queryOne("SELECT * FROM users WHERE LOWER(code) = ?", [codeClean]);
+        if (localUser) {
+          dbUser = localUser;
+          console.warn("⚠️ Using SQLite fallback for login:", codeClean);
+        }
+      } catch (sqlErr) {
+        console.warn("SQLite fallback also failed:", sqlErr);
       }
     }
 
