@@ -1,0 +1,101 @@
+  const itemsDashboardData = useMemo(() => {
+    const grouped = new Map<string, any>(); // itemId -> aggregation
+
+    filteredData.items.forEach(item => {
+      const id = String(item.itemId || item.id || "");
+      const book = item.bookQty || 0;
+      
+      const managerVal = item.managerQty !== undefined && item.managerQty !== null ? item.managerQty : null;
+      const supervisorVal = item.supervisorQty !== undefined && item.supervisorQty !== null ? item.supervisorQty : null;
+      
+      const skVal = item.storekeeperQty !== undefined && item.storekeeperQty !== null 
+        ? item.storekeeperQty 
+        : (item.physicalQty !== null && item.physicalQty !== undefined ? item.physicalQty : null);
+
+      // Definitive physical count priority: Manager > Supervisor > Storekeeper
+      const physical = managerVal !== null 
+        ? managerVal 
+        : (supervisorVal !== null ? supervisorVal : (skVal !== null ? skVal : 0));
+      
+      const diff = physical - book;
+      
+      // Detection of corrections
+      const isSupervisorCorrection = skVal !== null && supervisorVal !== null && skVal !== supervisorVal;
+      const isManagerCorrection = managerVal !== null && ((supervisorVal !== null && managerVal !== supervisorVal) || (supervisorVal === null && managerVal !== skVal));
+      
+      const correctionAmount = Math.abs(physical - (skVal || 0));
+
+        // Extract all specific modifications for this item from the session
+        // We look through session.modifications and find entries that changed this specific item
+        const itemVersionNum = getItemSessionVersion(id, item.sessionId);
+
+        const sessionArchiveModifications = (item.sessionModifications || []).map((mod: any) => {
+          const itemChange = mod.itemChanges?.find((change: any) => {
+            // Robust matching: by ID, itemCode, or Name
+            const cId = String(change.id || change.itemId || change.itemCode || "").trim();
+            const currentId = String(item.id || item.itemId || item.itemCode || "").trim();
+            const cName = String(change.name || change.itemName || "").trim().toLowerCase();
+            const currentName = String(item.name || item.itemName || "").trim().toLowerCase();
+            
+            return (cId && cId === currentId) || (cName && cName === currentName);
+          });
+
+          if (!itemChange) return null;
+          
+          // Handle field name variations and check what actually changed
+          const physNew = itemChange.newPhysicalQty !== undefined ? itemChange.newPhysicalQty : itemChange.newQty;
+          const physOld = itemChange.oldPhysicalQty !== undefined ? itemChange.oldPhysicalQty : itemChange.oldQty;
+          const superNew = itemChange.newSupervisorQty;
+          const superOld = itemChange.oldSupervisorQty;
+
+          const isPhysChanged = physNew !== undefined && physNew !== physOld;
+          const isSuperChanged = superNew !== undefined && superNew !== superOld;
+
+          // If nothing changed in the explicit fields, check if it's an old format entry with just 'newQty'
+          if (!isPhysChanged && !isSuperChanged && physNew === undefined) return null;
+
+          // Prioritize the value that actually changed in this modification entry. 
+          const displayQty = isSuperChanged ? superNew : physNew;
+          const displayOld = isSuperChanged ? superOld : physOld;
+          
+          // Resolve real name and role of modifier dynamically
+          const rawModifier = mod.modifiedBy || mod.modifier || "مسئول";
+          const details = getUserDetails(rawModifier, rawModifier, "مسئول البرنامج");
+          
+          return {
+            modifier: details.name,
+            modifierRole: details.role,
+            newQty: displayQty,
+            oldQty: displayOld,
+            timestamp: mod.modifiedAt || mod.timestamp || Date.now(),
+            sessionName: item.sessionName,
+            versionNumber: itemVersionNum
+          };
+        }).filter(Boolean);
+
+      let itemModifications: any[] = [];
+      
+      // 1. Get Storekeeper Modifications, filtered by current version
+      const skMods = getStorekeeperModifications(item).filter(mod => 
+        // We assume storekeeper mods don't have version, but should belong to this session/item
+        true 
+      ).map((mod: any) => ({
+        ...mod,
+        versionNumber: itemVersionNum
+      }));
+      itemModifications.push(...skMods);
+
+      // 1b. Add Cross-Session Modifications (Removed: Each session is independent)
+      const crossSessionMods: any[] = [];
+      
+      // 2. Supervisor Correction
+      if (isSupervisorCorrection) {
+        // Check if this supervisor correction is already recorded in sessionArchiveModifications
+        const alreadyRecordedSupMod = sessionArchiveModifications.some((mod: any) => 
+          mod.newQty === supervisorVal && mod.oldQty === skVal
+        );
+        
+        if (!alreadyRecordedSupMod) {
+          const supKey = "102"; // Strictly use supervisor's user code
+          const details = getUserDetails(supKey, "مشرف مخازن", "مشرف مخازن");
+          

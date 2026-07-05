@@ -1,0 +1,10 @@
+const sqlite3 = require('better-sqlite3');
+const db = new sqlite3('inventory_ai-studio-00951ae3-ee45-4ad1-ad2a-6733dde9830e_development.db');
+const activeSessRow = db.prepare("SELECT value FROM settings WHERE key = 'activeSession'").get();
+const activeSession = activeSessRow ? JSON.parse(activeSessRow.value) : null;
+const fs = require('fs');
+const mirrorPath = require('path').join(process.cwd(), 'server', 'server-local-sync-mirror_development.json');
+let mirror = JSON.parse(fs.readFileSync(mirrorPath));
+mirror.activeSession = activeSession;
+fs.writeFileSync(mirrorPath, JSON.stringify(mirror, null, 2));
+console.log("Wrote to mirror!");

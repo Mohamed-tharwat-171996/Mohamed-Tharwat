@@ -50,8 +50,8 @@ export class SessionService {
       const activeSessSetting = dbService.queryOne("SELECT value FROM settings WHERE key = 'activeSession'");
       const activeSession = activeSessSetting ? JSON.parse(activeSessSetting.value) : null;
 
-      // 4. Load past sessions limit 1000
-      const dbSnapshots = dbService.query("SELECT snapshot_data FROM inventory_snapshots ORDER BY date DESC, created_at DESC LIMIT 1000");
+      // 4. Load past sessions limit 200 (Memory safety: prevents OOM on large datasets)
+      const dbSnapshots = dbService.query("SELECT snapshot_data FROM inventory_snapshots ORDER BY date DESC, created_at DESC LIMIT 200");
       const pastSessions = dbSnapshots.map((row) => {
         const data = JSON.parse(row.snapshot_data);
         if (data && data.session && typeof data.session === 'object' && (data.session.items || data.session.snapshot_data)) {
@@ -61,7 +61,7 @@ export class SessionService {
       });
 
       // 4.5 Load deleted sessions for recycle bin (Admins only)
-      const dbDeleted = dbService.query("SELECT * FROM deleted_sessions ORDER BY deleted_at DESC LIMIT 100");
+      const dbDeleted = dbService.query("SELECT * FROM deleted_sessions ORDER BY deleted_at DESC LIMIT 50");
       const deletedSessions = dbDeleted.map(row => ({
         id: row.id,
         sessionId: row.session_id,
@@ -718,7 +718,7 @@ export class SessionService {
       const activeSessSetting = dbService.queryOne("SELECT value FROM settings WHERE key = 'activeSession'");
       const activeSession = activeSessSetting ? JSON.parse(activeSessSetting.value) : null;
 
-      const dbSnapshots = dbService.query("SELECT snapshot_data FROM inventory_snapshots ORDER BY date DESC, created_at DESC LIMIT 1000");
+      const dbSnapshots = dbService.query("SELECT snapshot_data FROM inventory_snapshots ORDER BY date DESC, created_at DESC LIMIT 200");
       const pastSessions = dbSnapshots.map((row: any) => {
         const data = JSON.parse(row.snapshot_data);
         if (data && data.session && typeof data.session === 'object' && (data.session.items || data.session.snapshot_data)) {
@@ -731,7 +731,7 @@ export class SessionService {
       const registeredUsers = dbService.query("SELECT * FROM users");
 
       // 🗑️ Include deleted sessions
-      const dbDeleted = dbService.query("SELECT * FROM deleted_sessions ORDER BY deleted_at DESC");
+      const dbDeleted = dbService.query("SELECT * FROM deleted_sessions ORDER BY deleted_at DESC LIMIT 50");
       const deletedSessions = dbDeleted.map((row: any) => ({
         id: row.id,
         sessionId: row.session_id,

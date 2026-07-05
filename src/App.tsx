@@ -2584,7 +2584,9 @@ export default function App() {
           inventoriedByName: numVal !== null ? (user?.name || prevName) : prevName,
           inventoriedAt: numVal !== null ? new Date().toISOString() : prevAt,
           ...(isStorekeeper ? { 
-            storekeeperQty: numVal,
+            // Do NOT overwrite storekeeperQty on keystroke! Keep the last officially submitted value intact.
+            // When submitting, handleStorekeeperSubmit will compare the old storekeeperQty with the new physicalQty and commit it.
+            storekeeperQty: item.storekeeperQty !== undefined && item.storekeeperQty !== null ? item.storekeeperQty : null,
             supervisorQty: null,
             managerQty: null
           } : {}),
@@ -3061,10 +3063,11 @@ export default function App() {
 
         // Only add a new modification entry if it's different from the last recorded one
         // and it's a genuine re-count (recheckRequested or change from previously submitted storekeeperQty)
-        if (item.recheckRequested && 
-            item.storekeeperQty !== null && 
+        const isGenuineRecount = (item.recheckRequested || (item.storekeeperQty !== null && item.storekeeperQty !== undefined)) && 
             item.storekeeperQty !== item.physicalQty &&
-            (!lastMod || lastMod.newQty !== item.physicalQty)) {
+            (!lastMod || lastMod.newQty !== item.physicalQty);
+
+        if (isGenuineRecount) {
           newSkMods.push({
             modifiedBy: user.code,
             modifiedByName: user.name,
@@ -3696,11 +3699,16 @@ export default function App() {
     : 0;
 
   const processedPastSessions = useMemo(() => {
+    // 0. Only include archived sessions as requested (Manager dashboard has no relation to active session)
+    const allSessionsToProcess = [...pastSessions];
+
     // 1. Deduplicate and clone objects to avoid mutating state directly
-    const deduplicated = pastSessions.filter((session, index, self) => {
-      if (self.findIndex(s => s.id === session.id) !== index) return false;
-      return true;
-    }).map(s => ({ ...s })); // shallow clone
+    const sessionMap = new Map();
+    allSessionsToProcess.forEach(s => {
+      // Use unique ID to prevent duplicates
+      sessionMap.set(s.id, { ...s });
+    });
+    const deduplicated = Array.from(sessionMap.values());
 
     // 2. Group by date to calculate version numbers per date
     const dateGroups: Record<string, typeof deduplicated> = {};
@@ -7385,19 +7393,37 @@ export default function App() {
                       </span>
                     </span>
                   </div>
-                  {['program_manager', 'stores_manager'].includes(user?.role || '') && (
-                    <button
-                      onClick={() => setShowInspectModifications(!showInspectModifications)}
-                      className={`flex items-center gap-1.5 mt-2 px-2.5 py-1 font-bold rounded-md text-[9px] transition-colors cursor-pointer w-fit ${
-                        inspectSession.modifications && inspectSession.modifications.length > 0
-                          ? "bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-100"
-                          : "bg-slate-50 hover:bg-slate-100 text-slate-400 opacity-60 border border-transparent"
-                      }`}
-                    >
-                      <Clock className="w-3 h-3" />
-                      سجل التعديلات ({inspectSession.modifications?.length || 0})
-                    </button>
-                  )}
+                  {(() => {
+                    const postArchiveMods = inspectSession.modifications || [];
+                    const storekeeperMods: any[] = [];
+                    (inspectSession.items || []).forEach((item) => {
+                      if (item.storekeeperModifications && item.storekeeperModifications.length > 0) {
+                        item.storekeeperModifications.forEach((mod: any) => {
+                          storekeeperMods.push({
+                            ...mod,
+                            itemName: item.itemName,
+                            itemId: item.itemId,
+                          });
+                        });
+                      }
+                    });
+                    storekeeperMods.sort((a, b) => new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime());
+                    const totalModsCount = postArchiveMods.length + storekeeperMods.length;
+
+                    return ['program_manager', 'stores_manager', 'warehouse_supervisor', 'supervisor', 'system_admin', 'general_manager'].includes(user?.role || '') && (
+                      <button
+                        onClick={() => setShowInspectModifications(!showInspectModifications)}
+                        className={`flex items-center gap-1.5 mt-2 px-2.5 py-1 font-bold rounded-md text-[9px] transition-colors cursor-pointer w-fit ${
+                          totalModsCount > 0
+                            ? "bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-100"
+                            : "bg-slate-50 hover:bg-slate-100 text-slate-400 opacity-60 border border-transparent"
+                        }`}
+                      >
+                        <Clock className="w-3 h-3" />
+                        سجل التعديلات ({totalModsCount})
+                      </button>
+                    );
+                  })()}
                 </div>
               </div>
               <div className="flex items-start gap-2">
@@ -7412,34 +7438,87 @@ export default function App() {
 
             {/* Modal Content */}
             <div className="p-5 overflow-y-auto flex-1 space-y-4 text-right" dir="rtl">
-              {showInspectModifications && inspectSession.modifications && inspectSession.modifications.length > 0 && (
-                <div className="bg-indigo-50/50 border border-indigo-100 rounded-xl p-3 space-y-2">
-                  <h4 className="text-[11px] font-bold text-indigo-900 mb-1 border-b border-indigo-100 pb-1.5 flex items-center gap-1.5">
-                    <Clock className="w-3.5 h-3.5 text-indigo-600" />
-                    سجل تعديلات الجرد بعد الأرشفة
-                  </h4>
-                  {inspectSession.modifications.map((mod, index) => (
-                    <div key={index} className="bg-white p-2.5 rounded-lg border border-indigo-50 shadow-sm text-[10px]">
-                      <div className="flex justify-between items-center mb-1.5">
-                        <span className="font-bold text-indigo-700">قام بالتعديل: {mod.modifiedBy}</span>
-                        <span className="text-[9px] text-slate-500 font-mono">{new Date(mod.modifiedAt).toLocaleString("ar-EG")}</span>
+              {(() => {
+                const postArchiveMods = inspectSession.modifications || [];
+                const storekeeperMods: any[] = [];
+                (inspectSession.items || []).forEach((item) => {
+                  if (item.storekeeperModifications && item.storekeeperModifications.length > 0) {
+                    item.storekeeperModifications.forEach((mod: any) => {
+                      storekeeperMods.push({
+                        ...mod,
+                        itemName: item.itemName,
+                        itemId: item.itemId,
+                      });
+                    });
+                  }
+                });
+                storekeeperMods.sort((a, b) => new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime());
+                const totalModsCount = postArchiveMods.length + storekeeperMods.length;
+
+                return showInspectModifications && totalModsCount > 0 && (
+                  <div className="space-y-3">
+                    {/* 1. Storekeeper modifications (before archiving) */}
+                    {storekeeperMods.length > 0 && (
+                      <div className="bg-emerald-50/40 border border-emerald-150 rounded-xl p-3 space-y-2 text-right" dir="rtl">
+                        <h4 className="text-[11px] font-bold text-emerald-900 mb-1 border-b border-emerald-100 pb-1.5 flex items-center gap-1.5 font-sans">
+                          <Clock className="w-3.5 h-3.5 text-emerald-600" />
+                          سجل تعديلات وإعادات الجرد الميداني (بواسطة أمناء المستودع)
+                        </h4>
+                        <div className="max-h-60 overflow-y-auto space-y-2">
+                          {storekeeperMods.map((mod, index) => (
+                            <div key={`sk-mod-${index}`} className="bg-white p-2.5 rounded-lg border border-emerald-100/50 shadow-3xs text-[10px]">
+                              <div className="flex justify-between items-center mb-1.5">
+                                <span className="font-bold text-emerald-700">أمين المستودع: {mod.modifiedByName || `موظف رقم ${mod.modifiedBy}`}</span>
+                                <span className="text-[9px] text-slate-500 font-mono">{new Date(mod.modifiedAt).toLocaleString("ar-EG")}</span>
+                              </div>
+                              <div className="flex justify-between items-center text-[9px] bg-slate-50 p-1.5 rounded">
+                                <span className="font-bold text-slate-700 truncate max-w-[60%]">{mod.itemName} ({mod.itemId})</span>
+                                <span className="font-mono text-slate-500">
+                                  <span className="line-through mx-1">{mod.oldQty === null || mod.oldQty === undefined ? "—" : mod.oldQty}</span>
+                                  <span className="text-emerald-600 font-bold mx-1">➜</span>
+                                  <span className="font-bold text-slate-800">{mod.newQty === null || mod.newQty === undefined ? "—" : mod.newQty}</span>
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                      <div className="space-y-1">
-                        {mod.itemChanges.map((change, idx) => (
-                          <div key={idx} className="flex justify-between items-center text-[9px] bg-slate-50 p-1 rounded">
-                            <span className="font-bold text-slate-700 truncate max-w-[60%]">{change.itemName}</span>
-                            <span className="font-mono text-slate-500">
-                              <span className="line-through mx-1">{change.oldQty === null ? "—" : change.oldQty}</span>
-                              <span className="text-emerald-600 font-bold mx-1">➜</span>
-                              <span className="font-bold text-slate-800">{change.newQty === null ? "—" : change.newQty}</span>
-                            </span>
-                          </div>
-                        ))}
+                    )}
+
+                    {/* 2. Manager/Supervisor modifications (after archiving) */}
+                    {postArchiveMods.length > 0 && (
+                      <div className="bg-indigo-50/50 border border-indigo-100 rounded-xl p-3 space-y-2 text-right" dir="rtl">
+                        <h4 className="text-[11px] font-bold text-indigo-900 mb-1 border-b border-indigo-100 pb-1.5 flex items-center gap-1.5 font-sans">
+                          <Clock className="w-3.5 h-3.5 text-indigo-600" />
+                          سجل تعديلات الجرد بعد الأرشفة (بواسطة الإدارة والمسؤولين)
+                        </h4>
+                        <div className="max-h-60 overflow-y-auto space-y-2">
+                          {postArchiveMods.map((mod: any, index: number) => (
+                            <div key={`post-mod-${index}`} className="bg-white p-2.5 rounded-lg border border-indigo-100/50 shadow-sm text-[10px]">
+                              <div className="flex justify-between items-center mb-1.5">
+                                <span className="font-bold text-indigo-700">قام بالتعديل: {mod.modifiedBy}</span>
+                                <span className="text-[9px] text-slate-500 font-mono">{new Date(mod.modifiedAt).toLocaleString("ar-EG")}</span>
+                              </div>
+                              <div className="space-y-1">
+                                {mod.itemChanges?.map((change: any, idx: number) => (
+                                  <div key={idx} className="flex justify-between items-center text-[9px] bg-slate-50 p-1 rounded">
+                                    <span className="font-bold text-slate-700 truncate max-w-[60%]">{change.itemName}</span>
+                                    <span className="font-mono text-slate-500">
+                                      <span className="line-through mx-1">{change.oldQty === null ? "—" : change.oldQty}</span>
+                                      <span className="text-emerald-600 font-bold mx-1">➜</span>
+                                      <span className="font-bold text-slate-800">{change.newQty === null ? "—" : change.newQty}</span>
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    </div>
-                  ))}
-                </div>
-              )}
+                    )}
+                  </div>
+                );
+              })()}
 
               {(() => {
                 const sessionItems = (inspectSession.items || []).filter((item) => {
@@ -7508,10 +7587,17 @@ export default function App() {
                               <div className="col-span-4 text-right pr-1">
                                 <span className="font-bold text-slate-800 block text-[10px] break-words leading-tight" title={item.itemName}>{item.itemName}</span>
                                 {item.storekeeperModifications && item.storekeeperModifications.length > 0 && (
-                                  <div className="mt-1 flex flex-col gap-0.5 items-start">
-                                    <span className="text-[8px] bg-emerald-100 text-emerald-800 border border-emerald-200 font-extrabold px-1 py-0.5 rounded-sm flex items-center gap-1 shadow-3xs">
-                                      🔄 تم إعادة الجرد ({item.storekeeperModifications.length})
+                                  <div className="mt-1 flex gap-1 items-start flex-wrap">
+                                    <span className="text-[8px] bg-emerald-100 text-emerald-800 border border-emerald-200 font-extrabold px-1 py-0.5 rounded-sm flex items-center gap-1 shadow-3xs" title="عدد مرات إعادة الجرد">
+                                      🔄 ({item.storekeeperModifications.length})
                                     </span>
+                                    {item.storekeeperModifications.map((mod: any, idx: number) => (
+                                      <span key={idx} className="text-[7.5px] bg-emerald-50 text-emerald-700 border border-emerald-100 font-bold px-1 py-0.5 rounded-sm flex items-center gap-0.5 shadow-3xs" title={`المعدل: ${mod.modifiedByName || "أمين مخزن"}`}>
+                                        <span className="opacity-75">{mod.oldQty}</span>
+                                        <span className="text-[8px]">←</span>
+                                        <span>{mod.newQty}</span>
+                                      </span>
+                                    ))}
                                   </div>
                                 )}
                                 {item.inventoriedByName && (

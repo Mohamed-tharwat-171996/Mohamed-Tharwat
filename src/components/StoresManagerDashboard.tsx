@@ -524,22 +524,16 @@ export default function StoresManagerDashboard({
 
       let itemModifications: any[] = [];
       
-      // 1. Get Storekeeper Modifications, filtered by current version
-      const skMods = getStorekeeperModifications(item).filter(mod => 
-        // We assume storekeeper mods don't have version, but should belong to this session/item
-        true 
-      ).map((mod: any) => ({
+      // 1. Get explicit Storekeeper Modifications from the item's own list
+      const skMods = getStorekeeperModifications(item).map((mod: any) => ({
         ...mod,
         versionNumber: itemVersionNum
       }));
       itemModifications.push(...skMods);
 
-      // 1b. Add Cross-Session Modifications (Removed: Each session is independent)
-      const crossSessionMods: any[] = [];
-      
-      // 2. Supervisor Correction
+      // 2. Supervisor Correction (Implicit or Explicit)
       if (isSupervisorCorrection) {
-        // Check if this supervisor correction is already recorded in sessionArchiveModifications
+        // Check if this supervisor correction is already recorded in sessionArchiveModifications or explicit modifications
         const alreadyRecordedSupMod = sessionArchiveModifications.some((mod: any) => 
           mod.newQty === supervisorVal && mod.oldQty === skVal
         );
@@ -548,7 +542,6 @@ export default function StoresManagerDashboard({
           const supKey = "102"; // Strictly use supervisor's user code
           const details = getUserDetails(supKey, "مشرف مخازن", "مشرف مخازن");
           
-          // Final chronological placement: use supervisorApprovedAt, fallback to archivedAt, fallback to inventoriedAt
           const baseDate = item.sessionSupervisorApprovedAt 
             ? new Date(item.sessionSupervisorApprovedAt)
             : (item.sessionArchivedAt ? new Date(item.sessionArchivedAt) : (item.inventoriedAt ? new Date(item.inventoriedAt) : null));
@@ -690,9 +683,23 @@ export default function StoresManagerDashboard({
     resultList.forEach(item => {
       // Sort history records NEWEST TO OLDEST for display
       item.history.sort((a: any, b: any) => {
-        const timeA = new Date(a.date).getTime();
-        const timeB = new Date(b.date).getTime();
-        if (timeA !== timeB) return timeB - timeA;
+        // Step 1: Compare by the Inventory Date string (YYYY-MM-DD)
+        const dateA = String(a.displayDate || "");
+        const dateB = String(b.displayDate || "");
+        
+        if (dateA !== dateB) {
+          return dateB.localeCompare(dateA); // Newest Date First (e.g. 2026-07-25 before 2026-06-25)
+        }
+        
+        // Step 2: If same day, sort by the Archive Timestamp (ISO string with time)
+        const timeA = new Date(a.date || 0).getTime();
+        const timeB = new Date(b.date || 0).getTime();
+        
+        if (timeA !== timeB) {
+          return timeB - timeA; // Newest Archive Time First
+        }
+        
+        // Step 3: Fallback to version number
         return (b.versionNumber || 1) - (a.versionNumber || 1);
       });
 
@@ -730,12 +737,31 @@ export default function StoresManagerDashboard({
       item.persistenceStreak = streak;
     });
 
-    // Apply Streak filter if selected - NO SORTING (Strict User Request)
-    return resultList.filter(item => {
-      if (streakFilter === "persistent") return item.persistenceStreak > 1;
-      if (streakFilter === "new") return item.latestDiff !== 0 && item.persistenceStreak === 1;
-      return true;
-    });
+    // Apply Streak filter if selected and sort by latest inventory date (Newest First)
+    return resultList
+      .filter(item => {
+        if (streakFilter === "persistent") return item.persistenceStreak > 1;
+        if (streakFilter === "new") return item.latestDiff !== 0 && item.persistenceStreak === 1;
+        return true;
+      })
+      .sort((a, b) => {
+        const getSortKey = (itemObj: any) => {
+          if (itemObj.history.length === 0) return "";
+          const top = itemObj.history[0];
+          return String(top.displayDate || (top.date ? top.date.split('T')[0] : ""));
+        };
+        const dateA = getSortKey(a);
+        const dateB = getSortKey(b);
+        
+        if (dateA !== dateB) {
+          return dateB.localeCompare(dateA);
+        }
+        
+        // Same inventory date, use archive time
+        const timeA = a.history.length > 0 ? new Date(a.history[0].date || 0).getTime() : 0;
+        const timeB = b.history.length > 0 ? new Date(b.history[0].date || 0).getTime() : 0;
+        return timeB - timeA;
+      });
   }, [filteredData, streakFilter]);
 
   // 6. Compute High-Level Metrics
@@ -988,17 +1014,15 @@ export default function StoresManagerDashboard({
         note: item.note || item.notes || "",
         storekeeperModCount,
         supervisorModCount,
-        managerModCount
+        managerModCount,
+        storekeeperModifications: getStorekeeperModifications(item)
       });
     });
 
     return Array.from(grouped.values()).map(auditor => {
       auditor.totalShifts = (auditor as any).sessionIds?.size || 0;
       const totalEvaluated = auditor.totalSubmitted;
-      // For accuracy rate, we still use items that needed corrections (isCorrected items)
-      // but the user didn't explicitly ask to change the accuracy formula, just the display columns.
-      // However, it's safer to count unique items that had a final correction.
-      const uniqueItemsWithCorrections = auditor.history.filter((h: any) => h.isCorrected).length;
+      const uniqueItemsWithCorrections = auditor.history.filter((h: any) => h.isCorrected || (h.storekeeperModCount && h.storekeeperModCount > 0)).length;
 
       // Storekeeper Recount Match Rate: percentage of checks that required no modifications
       const recountMatchRate = totalEvaluated > 0
@@ -1026,12 +1050,14 @@ export default function StoresManagerDashboard({
             notes: [],
             totalStorekeeperModifications: 0,
             totalSupervisorCorrections: 0,
-            totalManagerCorrections: 0
+            totalManagerCorrections: 0,
+            storekeeperModifications: []
           });
         }
         const day = dailyMap.get(groupKey);
         day.totalItems += 1;
-        if (h.isCorrected) {
+        // Count as re-inventory if supervisor corrected it OR if storekeeper had modifications
+        if (h.isCorrected || (h.storekeeperModifications && h.storekeeperModifications.length > 0) || (h.storekeeperModCount && h.storekeeperModCount > 0)) {
           day.rechecksCount += 1;
           day.recheckVariance += h.correctionAmount;
         }
@@ -1045,6 +1071,9 @@ export default function StoresManagerDashboard({
         day.totalStorekeeperModifications += h.storekeeperModCount || 0;
         day.totalSupervisorCorrections += h.supervisorModCount || 0;
         day.totalManagerCorrections += h.managerModCount || 0;
+        if (h.storekeeperModifications) {
+          day.storekeeperModifications.push(...h.storekeeperModifications);
+        }
       });
 
       const dailyHistory = Array.from(dailyMap.values()).map(day => ({

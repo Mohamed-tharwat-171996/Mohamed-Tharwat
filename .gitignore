@@ -6,6 +6,4 @@ coverage/
 *.log
 .env*
 !.env.example
-firebase-applet-config.json
-server/firebase-backup-config.json
 inventory*.db*
