@@ -186,7 +186,6 @@ export default function StoresManagerDashboard({
     const skModsRaw = [...(item.storekeeperModifications || [])];
 
     return skModsRaw
-      .filter((mod: any) => mod.oldQty !== mod.newQty)
       .map((mod: any) => {
         const details = getUserDetails(mod.modifiedBy || "103", mod.modifiedByName || "امين مخازن", "أمين مخزن");
         const rawTime = mod.modifiedAt || item.submittedAt || item.inventoriedAt || item.sessionDate;
@@ -1802,28 +1801,37 @@ export default function StoresManagerDashboard({
                                               >
                                                 <div className="flex items-center gap-3">
                                                   <div className="flex flex-col gap-0.5">
-                                                    <span className="font-mono text-[9px] text-indigo-950 font-black flex items-center gap-1">
-                                                      <Clock className="w-3 h-3 text-slate-400" />
-                                                      {h.displayDate || h.date}
-                                                    </span>
-                                                    <span className="font-mono text-[8px] text-slate-500 font-bold flex items-center gap-1">
-                                                      أرشفة: {new Date(h.date).toLocaleString('ar-EG', {
-                                                        year: 'numeric',
-                                                        month: 'numeric',
-                                                        day: 'numeric',
-                                                        hour: '2-digit',
-                                                        minute: '2-digit',
-                                                        hour12: true
-                                                      })}
-                                                    </span>
+                                                    <div className="flex items-center gap-2">
+                                                      <span className="font-mono text-[9px] text-indigo-950 font-black flex items-center gap-1">
+                                                        <Clock className="w-3 h-3 text-slate-400" />
+                                                        {h.displayDate || h.date}
+                                                      </span>
+                                                      <span className="font-mono text-[7.5px] text-slate-500 font-bold opacity-70">
+                                                        ({new Date(h.date).toLocaleString('ar-EG', {
+                                                          year: 'numeric',
+                                                          month: 'numeric',
+                                                          day: 'numeric',
+                                                          hour: '2-digit',
+                                                          minute: '2-digit',
+                                                          hour12: true
+                                                        })})
+                                                      </span>
+                                                    </div>
                                                     <span className="text-slate-400 font-bold truncate max-w-[120px]" title={h.sessionName}>
                                                       {h.sessionName}
                                                     </span>
-                                                    {h.versionNumber && (
-                                                      <span className="bg-emerald-50 text-emerald-700 border border-emerald-150 px-1.5 py-0.5 rounded text-[8px] font-black leading-none shrink-0 w-fit" title={`نسخة جرد رقم ${h.versionNumber}`}>
-                                                        نسخة: {h.versionNumber} {h.sessionId ? `(${h.sessionId})` : ''}
-                                                      </span>
-                                                    )}
+                                                    <div className="flex items-center gap-1">
+                                                      {h.versionNumber && (
+                                                        <span className="bg-emerald-50 text-emerald-700 border border-emerald-150 px-1.5 py-0.5 rounded text-[8px] font-black leading-none shrink-0 w-fit" title={`نسخة جرد رقم ${h.versionNumber}`}>
+                                                          نسخة: {h.versionNumber}
+                                                        </span>
+                                                      )}
+                                                      {h.sessionId && (
+                                                        <span className="bg-indigo-50 text-indigo-700 border border-indigo-150 px-1.5 py-0.5 rounded text-[8px] font-black leading-none shrink-0 w-fit" title={`المعرف الفريد للجلسة: ${h.sessionId}`}>
+                                                          ID: {h.sessionId}
+                                                        </span>
+                                                      )}
+                                                    </div>
                                                   </div>
                                                 </div>
                                                 
@@ -1864,7 +1872,7 @@ export default function StoresManagerDashboard({
                                                               className={`px-1 py-0.5 rounded border text-[7.5px] font-extrabold flex items-center gap-0.5 transition-all hover:scale-105 active:scale-95 cursor-pointer leading-none shadow-3xs ${userColors.bg}`}
                                                               title={`تعديل بواسطة: ${m.modifier} (${m.modifierRole || "أمين مخزن"}) - اضغط للتفاصيل`}
                                                             >
-                                                              <span className="opacity-75">{m.isStorekeeperModification ? "تعديل أمين:" : `${m.modifier}:`}</span>
+                                                              <span className="opacity-75">{m.modifier}:</span>
                                                               <span className="font-mono font-black">{m.newQty}</span>
                                                             </button>
                                                           );
@@ -2337,9 +2345,21 @@ export default function StoresManagerDashboard({
 
                                                     <div className="shrink-0">
                                                       {day.recountsCount > 0 ? (
-                                                        <span className="bg-amber-50 text-amber-700 px-2 py-0.5 rounded text-[9px] font-black border border-amber-100 whitespace-nowrap">
-                                                          تمت اعادة جرد {day.recountsCount} صنف باجمالي تعديلات {day.totalStorekeeperModifications + day.totalSupervisorCorrections + day.totalManagerCorrections}
-                                                        </span>
+                                                        <div className="flex flex-col gap-0.5">
+                                                          <span className="bg-amber-50 text-amber-700 px-2 py-0.5 rounded text-[9px] font-black border border-amber-100 whitespace-nowrap">
+                                                            تمت اعادة جرد {day.recountsCount} صنف باجمالي تعديلات {day.totalStorekeeperModifications + day.totalSupervisorCorrections + day.totalManagerCorrections}
+                                                          </span>
+                                                          {/* Detailed mods for this day if available */}
+                                                          {day.storekeeperModifications && day.storekeeperModifications.length > 0 && (
+                                                            <div className="flex flex-wrap gap-1 max-w-[300px]">
+                                                              {day.storekeeperModifications.map((m: any, midx: number) => (
+                                                                <span key={midx} className="bg-orange-50 text-orange-700 border border-orange-100 px-1 rounded text-[7px] font-bold">
+                                                                  {m.oldQty} ➔ {m.newQty}
+                                                                </span>
+                                                              ))}
+                                                            </div>
+                                                          )}
+                                                        </div>
                                                       ) : (
                                                         <span className="bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded text-[9px] font-bold border border-emerald-100 whitespace-nowrap">
                                                           ✓ تطابق فوري وتصديق مع الأمناء

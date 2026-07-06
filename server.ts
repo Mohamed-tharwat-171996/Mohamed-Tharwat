@@ -1,3 +1,34 @@
+// Intercept and swallow benign Firestore BloomFilter warnings before any imports
+const originalConsoleError = console.error;
+console.error = function (...args) {
+  const msg = args.map(a => {
+    if (a instanceof Error) return a.message + "\n" + a.stack;
+    if (typeof a === 'object') {
+      try { return JSON.stringify(a); } catch (e) { return String(a); }
+    }
+    return String(a);
+  }).join(" ");
+  if (msg.includes("BloomFilter") || msg.includes("Invalid hash count")) {
+    return;
+  }
+  originalConsoleError.apply(console, args);
+};
+
+const originalConsoleWarn = console.warn;
+console.warn = function (...args) {
+  const msg = args.map(a => {
+    if (a instanceof Error) return a.message + "\n" + a.stack;
+    if (typeof a === 'object') {
+      try { return JSON.stringify(a); } catch (e) { return String(a); }
+    }
+    return String(a);
+  }).join(" ");
+  if (msg.includes("BloomFilter") || msg.includes("Invalid hash count")) {
+    return;
+  }
+  originalConsoleWarn.apply(console, args);
+};
+
 import express from "express";
 import path from "path";
 import fs from "fs";
@@ -134,6 +165,16 @@ async function startServer() {
           try {
             const success = await FirebaseBackupService.restoreStateFromCloud(false);
             console.log(`☁️ [SYNC_RESULT] FirebaseBackupService.restoreStateFromCloud for [${expectedTag}]: ${success ? "SUCCESS" : "NO_BACKUP_FOUND"}`);
+            
+            // Restore deleted sessions from Firestore to SQLite to prevent re-appearing
+            try {
+              const { getFirestoreCollection } = await import("./server/services/firestoreService");
+              const cloudDeleted = await getFirestoreCollection("deleted_sessions");
+              for (const ds of cloudDeleted) {
+                dbService.run("INSERT OR IGNORE INTO deleted_sessions (session_id, deleted_at, session_data, deleted_reason) VALUES (?,?,?,?)",
+                  [ds.session_id, ds.deleted_at, ds.session_data, ds.deleted_reason]);
+              }
+            } catch (e) { console.warn("Could not restore deleted sessions from cloud:", e); }
           } catch (restoreErr: any) {
             console.error(`🛑 Failed cloud state recovery during routine startup for [${expectedTag.toUpperCase()}]: ${restoreErr.message}`);
           }
@@ -159,6 +200,18 @@ async function startServer() {
              } catch (recoveryErr) {
                 console.error(`❌ Emergency recovery failed for [${expectedTag.toUpperCase()}]:`, recoveryErr);
              }
+          }
+
+          // 🚀 CRITICAL CLOUD-SYNC FOR COLD STARTS AND REFRESHES:
+          // Synchronize snapshots, deleted sessions, and active state dynamically from Firestore to keep SQLite perfectly synchronized with Cloud.
+          try {
+            console.log(`☁️ Synchronizing active state, archived snapshots, and deleted sessions from Firestore for [${expectedTag.toUpperCase()}]...`);
+            await FirebaseBackupService.syncActiveStateFromCloud();
+            await FirebaseBackupService.syncSnapshotsFromCloud();
+            await FirebaseBackupService.syncDeletedSessionsFromCloud();
+            console.log(`☁️ Primary synchronization successfully completed for [${expectedTag.toUpperCase()}].`);
+          } catch (syncErr: any) {
+            console.error(`⚠️ Dynamic cloud synchronization failed on startup for [${expectedTag.toUpperCase()}]:`, syncErr.message || syncErr);
           }
         }
 
@@ -222,7 +275,7 @@ async function startServer() {
       }
 
       ws.on("message", (message) => {
-        requestEnvStorage.run(env, () => {
+        requestEnvStorage.run(env, async () => {
           try {
             const payload = JSON.parse(message.toString());
             if (payload.type === "SYNC_PUSH") {
@@ -236,7 +289,7 @@ async function startServer() {
                 const oldState = SessionService.getState();
 
                 // Atomic write inside Transaction with correct actor tracking
-                SessionService.saveState(incoming, actorCode, "WebSocket");
+                await SessionService.saveState(incoming, actorCode, "WebSocket");
 
                 // Broadcast compiled update to all active connections
                 const updated = SessionService.getState();

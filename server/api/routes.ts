@@ -145,6 +145,25 @@ router.get("/data", AuthService.authenticateJWT, async (req: AuthenticatedReques
     const state = SessionService.getState();
     const quotaData = await QuotaService.getGlobalQuota();
     
+    // Trigger asynchronous background sync to make sure the local SQLite database matches Firestore
+    // and broadcast the fresh state to any active clients immediately on completion.
+    (async () => {
+      try {
+        await FirebaseBackupService.syncActiveStateFromCloud();
+        await FirebaseBackupService.syncSnapshotsFromCloud();
+        await FirebaseBackupService.syncDeletedSessionsFromCloud();
+        
+        // Broadcast the updated state to all connected WS clients
+        const broadcast = (req.app as any).getWssBroadcast ? (req.app as any).getWssBroadcast() : null;
+        if (broadcast) {
+          const freshState = SessionService.getState();
+          broadcast(freshState);
+        }
+      } catch (syncErr: any) {
+        console.warn("Background cloud sync on /api/data bypassed:", syncErr.message || syncErr);
+      }
+    })();
+
     res.json({
       status: "ok",
       data: state,
@@ -224,7 +243,7 @@ router.post("/data", AuthService.authenticateJWT, async (req: AuthenticatedReque
     const activeSessSetting = dbService.queryOne("SELECT value FROM settings WHERE key = 'activeSession'");
     const currentActive = activeSessSetting ? JSON.parse(activeSessSetting.value) : null;
 
-    SessionService.saveState(stateToSave, actor, getClientIp(req));
+    await SessionService.saveState(stateToSave, actor, getClientIp(req));
 
     const nextActiveSessSetting = dbService.queryOne("SELECT value FROM settings WHERE key = 'activeSession'");
     const nextActive = nextActiveSessSetting ? JSON.parse(nextActiveSessSetting.value) : null;
@@ -333,6 +352,37 @@ router.post("/admin/clear-active-session", AuthService.authenticateJWT, AuthServ
   try {
     const actor = req.user?.code || "ADMIN";
     
+    // Get current active session details first to add to recycle bin (deleted_sessions)
+    const stateBefore = SessionService.getStateWithPasswords();
+    const currentActive = stateBefore.activeSession;
+    
+    if (currentActive && currentActive.id) {
+      const activeStubData = JSON.stringify({ ...currentActive, type: "active", deletedReason: "تم تصفير وحذف الجلسة النشطة بطلب من المسؤول" });
+      dbService.run(`
+        INSERT INTO deleted_sessions (session_id, deleted_at, session_data, deleted_reason)
+        VALUES (?, ?, ?, ?)
+      `, [
+        String(currentActive.id),
+        new Date().toISOString(),
+        activeStubData,
+        "تم تصفير وحذف الجلسة النشطة بطلب من المسؤول"
+      ]);
+      dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedDeletedSessions', ?)", [Date.now().toString()]);
+      
+      if (!getFirestoreApiDisabled()) {
+        try {
+          await setFirestoreDoc("deleted_sessions", String(currentActive.id), {
+            session_id: String(currentActive.id),
+            deleted_at: new Date().toISOString(),
+            deleted_reason: "تم تصفير وحذف الجلسة النشطة بطلب من المسؤول",
+            session_data: activeStubData
+          });
+        } catch (fsErr) {
+          console.warn("Could not save cleared active session stub to Firestore:", fsErr);
+        }
+      }
+    }
+
     // 1. Clear locally
     SessionService.clearActiveSession();
     
@@ -613,23 +663,7 @@ router.get("/logs", AuthService.authenticateJWT, AuthService.requireRole(["gener
 router.get("/deleted", AuthService.authenticateJWT, AuthService.requireRole(["general_manager", "system_admin", "super_admin", "program_manager"]), async (req: AuthenticatedRequest, res: Response) => {
   try {
     // Prune deleted sessions older than 3 days automatically
-    const threeDaysAgo = new Date();
-    threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
-    const isoThreshold = threeDaysAgo.toISOString();
-
-    const rowsToDelete = dbService.query("SELECT id FROM deleted_sessions WHERE deleted_at < ?", [isoThreshold]);
-    if (rowsToDelete.length > 0) {
-      const ids = rowsToDelete.map(r => r.id);
-      const { getFirestoreApiDisabled, deleteFirestoreDoc } = await import("../services/firestoreService");
-      if (!getFirestoreApiDisabled()) {
-        for (const id of ids) {
-          deleteFirestoreDoc("deleted_sessions", String(id)).catch(e => {
-            console.warn(`⚠️ Cloud delete failed for pruned deleted session ${id}:`, e.message);
-          });
-        }
-      }
-      dbService.run(`DELETE FROM deleted_sessions WHERE id IN (${ids.join(",")})`);
-    }
+    SessionService.pruneDeletedSessions();
 
     const dbDeleted = dbService.query("SELECT * FROM deleted_sessions ORDER BY id DESC");
     const deletedSessions = dbDeleted.map((row) => ({
@@ -647,7 +681,7 @@ router.get("/deleted", AuthService.authenticateJWT, AuthService.requireRole(["ge
 });
 
 // 10. Restore a deleted session (System Admins only)
-router.post("/deleted/restore", AuthService.authenticateJWT, AuthService.requireRole(["general_manager", "system_admin", "super_admin"]), (req: AuthenticatedRequest, res: Response) => {
+router.post("/deleted/restore", AuthService.authenticateJWT, AuthService.requireRole(["general_manager", "system_admin", "super_admin"]), async (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.body;
   if (!id) {
     return res.status(400).json({ error: "الرجاء تحديد الجلسة المطلوب استعادتها." });
@@ -655,7 +689,8 @@ router.post("/deleted/restore", AuthService.authenticateJWT, AuthService.require
 
   try {
     const actor = req.user?.code || "ADMIN";
-    const row = dbService.queryOne("SELECT * FROM deleted_sessions WHERE id = ?", [id]);
+    // Support both auto-increment ID and stable session_id string lookup
+    const row = dbService.queryOne("SELECT * FROM deleted_sessions WHERE id = ? OR session_id = ?", [id, String(id)]);
     if (!row) {
       return res.status(404).json({ error: "لم يتم العثور على الجلسة المحذوفة." });
     }
@@ -739,9 +774,21 @@ router.post("/deleted/restore", AuthService.authenticateJWT, AuthService.require
         );
       }
 
-      // Cleanup resolved recycling bin entry
-      dbService.run("DELETE FROM deleted_sessions WHERE id = ?", [id]);
+      // Cleanup resolved recycling bin entry from local SQLite
+      dbService.run("DELETE FROM deleted_sessions WHERE id = ?", [row.id]);
     });
+
+    // Cleanup Firestore deleted session document
+    try {
+      const { getFirestoreApiDisabled, deleteFirestoreDoc } = await import("../services/firestoreService");
+      if (!getFirestoreApiDisabled()) {
+        await deleteFirestoreDoc("deleted_sessions", String(row.session_id));
+        await deleteFirestoreDoc("deleted_sessions", String(row.id));
+        await deleteFirestoreDoc("deleted_sessions", String(id));
+      }
+    } catch (fsErr: any) {
+      console.warn("⚠️ Bypassed Firestore doc deletion during restore:", fsErr.message);
+    }
 
     // Save durable checkpoint after restoration of recycled session
     SessionService.writeDurableCheckpoint();
@@ -766,14 +813,14 @@ router.post("/deleted/permanently-delete", AuthService.authenticateJWT, AuthServ
   try {
     const actor = req.user?.code || "ADMIN";
     
-    // Get row before deleting to log it
-    const row = dbService.queryOne("SELECT * FROM deleted_sessions WHERE id = ?", [id]);
+    // Get row before deleting to log it (support both auto-increment ID and stable session_id string)
+    const row = dbService.queryOne("SELECT * FROM deleted_sessions WHERE id = ? OR session_id = ?", [id, String(id)]);
     if (!row) {
       return res.status(404).json({ error: "لم يتم العثور على الجلسة." });
     }
 
     dbService.transaction(() => {
-      dbService.run("DELETE FROM deleted_sessions WHERE id = ?", [id]);
+      dbService.run("DELETE FROM deleted_sessions WHERE id = ?", [row.id]);
       dbService.run("INSERT OR REPLACE INTO permanent_tombstones (session_id, tombstoned_at) VALUES (?, ?)", [
         row.session_id,
         new Date().toISOString()
@@ -796,7 +843,12 @@ router.post("/deleted/permanently-delete", AuthService.authenticateJWT, AuthServ
     if (!getFirestoreApiDisabled()) {
       try {
         // 🛡️ TRIPLE-STRETCH DELETION: Explicitly remove from all possible cloud collections immediately
+        // Delete using session_id (correct document ID format)
+        await deleteFirestoreDoc("deleted_sessions", String(row.session_id));
+        // Delete using other legacy ID formats (to clean up any stale duplicates)
+        await deleteFirestoreDoc("deleted_sessions", String(row.id));
         await deleteFirestoreDoc("deleted_sessions", String(id));
+
         if (row && row.session_id) {
           await deleteFirestoreDoc("inventory_snapshots", String(row.session_id));
           // 🛡️ Tombstone in Firestore

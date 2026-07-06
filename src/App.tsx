@@ -2642,7 +2642,7 @@ export default function App() {
           inventoriedAt: new Date().toISOString(),
           storekeeperModifications: item.storekeeperModifications || [],
           ...(isStorekeeper ? { 
-            storekeeperQty: calculatedQty,
+            storekeeperQty: item.storekeeperQty !== undefined && item.storekeeperQty !== null ? item.storekeeperQty : null,
             supervisorQty: null,
             managerQty: null
           } : {}),
@@ -2744,6 +2744,50 @@ export default function App() {
     } catch (err) {
       console.error(err);
       showToast("⚠️ حدث خطأ أثناء إبلاغ السيرفر بحذف الجلسة النشطة.", "error");
+    }
+  };
+
+  // Force clear and reset active session from everywhere including cloud and local storage
+  const handleForceClearActiveSession = async () => {
+    if (user?.role && !["program_manager", "general_manager", "system_admin", "super_admin"].includes(user.role)) {
+      showToast("عذراً، هذه الصلاحية متوفرة فقط لمسئول البرنامج أو الإدارة.", "error");
+      return;
+    }
+
+    const confirmClear = window.confirm(
+      "⚠️ تحذير أمني خطير: هل أنت متأكد من حذف وتصفير أي جلسة نشطة مسجلة (بما في ذلك المسودات والبيانات السحابية والمحلية) نهائياً وبشكل قطعي؟ لا يمكن التراجع عن هذا الإجراء وسيتم نقلها لسلة المحذوفات وتصفير حالتها تماماً."
+    );
+    if (!confirmClear) return;
+
+    // Completely clear active session locally first
+    setActiveSession(null);
+    localStorage.removeItem("inventory_active_session");
+    
+    // Clear draft indicators
+    localStorage.removeItem("inventory_has_unsaved_changes");
+    setHasUnsavedChangesState(false);
+    localStorage.removeItem("inventory_has_pending_assignments");
+    setHasPendingAssignmentsState(false);
+
+    try {
+      const res = await fetch("/api/admin/clear-active-session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${localStorage.getItem("inventory_token")}`
+        }
+      });
+      const data = await res.json();
+      if (res.ok) {
+        await checkSystemStatus();
+        await loadCloudBackupMetadataOnly();
+        showToast("🗑️ تم حذف وتصفير الجلسة النشطة نهائياً من جميع أجزاء التطبيق والفاير ستور بنجاح.", "success");
+      } else {
+        showToast(`❌ فشل حذف الجلسة النشطة: ${data.error || "خطأ غير معروف"}`, "error");
+      }
+    } catch (err) {
+      console.error(err);
+      showToast("⚠️ حدث خطأ في الاتصال بالخادم لمسح الجلسة النشطة.", "error");
     }
   };
 
@@ -3063,18 +3107,20 @@ export default function App() {
         const lastMod = newSkMods.length > 0 ? newSkMods[newSkMods.length - 1] : null;
 
         // Only add a new modification entry if it's different from the last recorded one
-        // and it's a genuine re-count (recheckRequested or change from previously submitted storekeeperQty)
-        const isGenuineRecount = (item.recheckRequested || (item.storekeeperQty !== null && item.storekeeperQty !== undefined)) && 
+        // OR if a recheck was explicitly requested by the supervisor (even if they stood by their previous count)
+        const isGenuineRecount = item.recheckRequested || (
+            (item.storekeeperQty !== null && item.storekeeperQty !== undefined) && 
             item.storekeeperQty !== item.physicalQty &&
-            (!lastMod || lastMod.newQty !== item.physicalQty);
+            (!lastMod || lastMod.newQty !== item.physicalQty)
+        );
 
         if (isGenuineRecount) {
           newSkMods.push({
             modifiedBy: user.code,
             modifiedByName: user.name,
             modifiedAt: new Date().toISOString(),
-            oldQty: item.storekeeperQty,
-            newQty: item.physicalQty
+            oldQty: item.storekeeperQty === undefined ? null : item.storekeeperQty,
+            newQty: item.physicalQty === undefined ? null : item.physicalQty
           });
         }
         return { 
@@ -4252,7 +4298,7 @@ export default function App() {
 
         {/* Modern High-Contrast Application Header (Unified for Admin) */}
         <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
-          <div className={`w-full px-2 sm:px-4 lg:px-6 py-1 flex flex-col gap-0 ${user && ["program_manager"].includes(user.role) ? "sm:min-h-[165px] pt-1" : ""}`}>
+          <div className="w-full px-2 sm:px-4 lg:px-6 py-1 flex flex-col gap-0">
             <div className="flex items-center justify-center w-full relative pb-1 mb-1 border-b border-transparent">
               <div className="flex flex-col items-center gap-1 shrink-0 mt-0.5 absolute right-0">
                    <AlEmanLogo className="w-8 h-8 sm:w-9 sm:h-9" />
@@ -4673,11 +4719,22 @@ export default function App() {
                                         </span>
                                       </div>
 
-                                      <div className="bg-white p-2.5 rounded-xl border border-slate-150 space-y-1 col-span-2 lg:col-span-1">
-                                        <span className="text-[9px] font-bold text-slate-400 block pb-0.5 text-right">حالة الدورة الحالية</span>
-                                        <span className={`text-[10.5px] font-black block text-right ${cloudBackupMetadata.hasActiveSession ? "text-amber-600" : "text-slate-400"}`}>
-                                          {cloudBackupMetadata.hasActiveSession ? "يوجد جلسة نشطة" : "لا توجد جلسات حية"}
-                                        </span>
+                                      <div className="bg-white p-2.5 rounded-xl border border-slate-150 space-y-1 col-span-2 lg:col-span-1 flex flex-col justify-between">
+                                        <div>
+                                          <span className="text-[9px] font-bold text-slate-400 block pb-0.5 text-right">حالة الدورة الحالية</span>
+                                          <span className={`text-[10.5px] font-black block text-right ${cloudBackupMetadata.hasActiveSession ? "text-amber-600" : "text-slate-400"}`}>
+                                            {cloudBackupMetadata.hasActiveSession ? "يوجد جلسة نشطة" : "لا توجد جلسات حية"}
+                                          </span>
+                                        </div>
+                                        {cloudBackupMetadata.hasActiveSession && user?.role && ["program_manager", "general_manager", "system_admin", "super_admin"].includes(user.role) && (
+                                          <button
+                                            type="button"
+                                            onClick={handleForceClearActiveSession}
+                                            className="w-full mt-1.5 font-bold text-[8.5px] py-1 px-1.5 border border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100 rounded-lg cursor-pointer transition-all active:scale-95 text-center focus:outline-none"
+                                          >
+                                            حذف وتصفير الجلسة النشطة نهائياً 🗑️
+                                          </button>
+                                        )}
                                       </div>
                                     </div>
 
@@ -5649,7 +5706,7 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        <div className={`w-full px-0.5 sm:px-1 lg:px-1.5 py-0.5 flex flex-col gap-0 ${user && ["program_manager"].includes(user.role) ? "sm:min-h-[140px] pt-0.5" : ""}`}>
+        <div className={`w-full px-0.5 sm:px-1 lg:px-1.5 py-0.5 flex flex-col gap-0`}>
             <div className="flex items-center justify-center w-full relative pb-0.5 mb-0.5 border-b border-transparent">
               <div className="flex flex-col items-center gap-1 shrink-0 mt-0.5 absolute right-0">
                    <AlEmanLogo className="w-8 h-8 sm:w-9 sm:h-9" />
@@ -5673,15 +5730,19 @@ export default function App() {
               <div className="flex items-center justify-between w-full px-1 bg-transparent border-0 mt-0">
                 
                 {/* Right side info (Top Row) */}
-                <div className="flex flex-col items-start gap-1.5 py-0.5">
-                  <span className="text-[12.5px] sm:text-[13.5px] font-black text-emerald-600 leading-normal text-right truncate" title={user.name}>
+                <div className="flex items-center gap-2 py-0.5">
+                  <span className="text-[12.5px] sm:text-[13.5px] font-black text-emerald-600 leading-normal text-right truncate max-w-[140px]" title={user.name}>
                     {user.name}
                   </span>
-                  {activeSession ? (
-                      <span className="text-[8px] bg-emerald-100 text-emerald-800 px-1 rounded" title={`جلسة نشطة: ${activeSession.id}`}>جلسة: {activeSession.id}</span>
-                  ) : user.role !== 'stores_manager' ? (
-                      <span className="text-[8px] bg-rose-100 text-rose-800 px-1 rounded">لا توجد جلسة</span>
-                  ) : null}
+                  {user.role !== 'stores_manager' && (
+                    activeSession ? (
+                        <span className="text-[8.5px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded shadow-3xs font-black font-mono" title="المعرف الفريد للجلسة النشطة">
+                          {activeSession.id}
+                        </span>
+                    ) : (
+                        <span className="text-[8.5px] bg-rose-100 text-rose-800 px-1.5 py-0.5 rounded shadow-3xs font-bold">لا توجد جلسة</span>
+                    )
+                  )}
                 </div>
 
                 {/* Left side actions (Top Row) - In RTL, placed after info so they render on the left */}
@@ -5914,7 +5975,7 @@ export default function App() {
                     ) : null}
 
                     {user.role === 'stores_manager' && activeSupervisorTab === 'manager_dashboard' && (
-                      <div className="relative h-[26px] flex items-center shrink-0 animate-fadeIn z-50 -translate-y-[1.5px]">
+                      <div className="relative h-[26px] flex items-center shrink-0 animate-fadeIn z-50">
                         <select 
                           value={storesManagerSubTab}
                           onChange={(e) => setStoresManagerSubTab(e.target.value as any)}
@@ -5933,7 +5994,7 @@ export default function App() {
                     <button
                         type="button"
                         onClick={handleLogout}
-                        className={`w-[26px] h-[26px] flex items-center justify-center border border-red-200 hover:bg-red-50 text-red-650 bg-white rounded-md transition-all shadow-3xs cursor-pointer shrink-0 ${user.role !== 'general_manager' ? '-translate-y-[1.5px]' : ''}`}
+                        className={`w-[26px] h-[26px] flex items-center justify-center border border-red-200 hover:bg-red-50 text-red-650 bg-white rounded-md transition-all shadow-3xs cursor-pointer shrink-0`}
                         title="تسجيل الخروج"
                     >
                         <LogOut className="w-3.5 h-3.5 text-red-600" />
@@ -6356,9 +6417,19 @@ export default function App() {
                                       </span>
                                     )}
                                     {(item.storekeeperModifications && item.storekeeperModifications.length > 0) && (
-                                      <span className="text-[9px] bg-emerald-100 text-emerald-800 border border-emerald-200 font-extrabold px-1.5 py-0.5 rounded-md mt-1 flex items-center gap-1 shadow-3xs">
-                                        🔄 تم إعادة الجرد ({item.storekeeperModifications.length})
-                                      </span>
+                                      <div className="flex flex-wrap items-center gap-1 mt-1">
+                                        <span className="text-[9px] bg-emerald-100 text-emerald-800 border border-emerald-200 font-extrabold px-1.5 py-0.5 rounded-md flex items-center gap-1 shadow-3xs" title="عدد مرات إعادة الجرد">
+                                          🔄 ({item.storekeeperModifications.length})
+                                        </span>
+                                        {item.storekeeperModifications.map((mod: any, idx: number) => (
+                                          <span key={idx} className="text-[8px] bg-orange-50 text-orange-700 border border-orange-100 font-bold px-1.5 py-0.5 rounded-md flex items-center gap-0.5 shadow-3xs" title={`المعدل: ${mod.modifiedByName || "أمين مخزن"}`}>
+                                            <span className="opacity-75 text-[7px]">{mod.modifiedByName || "أمين"}:</span>
+                                            <span className="opacity-75">{mod.oldQty === null ? "—" : mod.oldQty}</span>
+                                            <span className="text-[8px] text-emerald-600">➔</span>
+                                            <span className="font-black text-slate-800">{mod.newQty === null ? "—" : mod.newQty}</span>
+                                          </span>
+                                        ))}
+                                      </div>
                                     )}
                                   </div>
                                   {item.inventoriedByName && (
@@ -7630,6 +7701,7 @@ export default function App() {
                                     </span>
                                     {item.storekeeperModifications.map((mod: any, idx: number) => (
                                       <span key={idx} className="text-[7.5px] bg-emerald-50 text-emerald-700 border border-emerald-100 font-bold px-1 py-0.5 rounded-sm flex items-center gap-0.5 shadow-3xs" title={`المعدل: ${mod.modifiedByName || "أمين مخزن"}`}>
+                                        <span className="opacity-75 text-[7px]">{mod.modifiedByName || "أمين"}:</span>
                                         <span className="opacity-75">{mod.oldQty}</span>
                                         <span className="text-[8px]">←</span>
                                         <span>{mod.newQty}</span>

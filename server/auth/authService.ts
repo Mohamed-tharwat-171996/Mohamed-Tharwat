@@ -170,17 +170,12 @@ export class AuthService {
       }
     }
 
-    // SQLite fallback if Firestore unavailable or user not found there
+    // SQLite fallback if Firestore unavailable
     if (!dbUser) {
       try {
         const localUser = dbService.queryOne("SELECT * FROM users WHERE LOWER(code) = ?", [codeClean]);
-        if (localUser) {
-          dbUser = localUser;
-          console.warn("⚠️ Using SQLite fallback for login:", codeClean);
-        }
-      } catch (sqlErr) {
-        console.warn("SQLite fallback also failed:", sqlErr);
-      }
+        if (localUser) { dbUser = localUser; console.warn("⚠️ Using SQLite fallback for login:", codeClean); }
+      } catch (sqlErr) { console.warn("SQLite fallback also failed:", sqlErr); }
     }
 
     if (!dbUser) {

@@ -1,0 +1,106 @@
+            <div className="flex flex-col flex-grow py-0 gap-1.5 min-w-0">
+              
+              {/* Top row: Right Info (Username) & Left Actions (Edit Profile + User Options) */}
+              <div className="flex items-center justify-between w-full px-1 bg-transparent border-0 mt-0">
+                
+                {/* Right side info (Top Row) */}
+                <div className="flex flex-col items-start gap-1.5 py-0.5">
+                  <span className="text-[12.5px] sm:text-[13.5px] font-black text-emerald-600 leading-normal text-right truncate" title={user.name}>
+                    {user.name}
+                  </span>
+                  {user.role !== 'stores_manager' && (
+                    activeSession ? (
+                        <span className="text-[8px] bg-emerald-100 text-emerald-800 px-1 rounded" title={`جلسة نشطة: ${activeSession.id}`}>جلسة: {activeSession.id}</span>
+                    ) : (
+                        <span className="text-[8px] bg-rose-100 text-rose-800 px-1 rounded">لا توجد جلسة</span>
+                    )
+                  )}
+                </div>
+
+                {/* Left side actions (Top Row) - In RTL, placed after info so they render on the left */}
+                <div className="flex items-center justify-end gap-1.5 shrink-0 pl-1 z-50 pointer-events-auto">
+                    {user.role === 'program_manager' && (
+                        <div className="relative h-[26px] flex items-center shrink-0">
+                          <select 
+                            value={activeProgramManagerTab}
+                            onChange={(e) => setActiveProgramManagerTab(e.target.value as any)}
+                            className="pl-6 pr-1.5 py-0 bg-blue-50 border border-blue-100 rounded-lg text-[9px] font-black text-blue-700 focus:ring-1 focus:ring-blue-500/20 focus:border-blue-400 outline-none appearance-none cursor-pointer text-right transition-all h-[26px] w-[105px] min-w-[105px] max-w-[105px]"
+                          >
+                            <option value="none">خيارات مستخدم</option>
+                            <option value="upload">اصناف وارصدة 📥</option>
+                            <option value="archive">ارشيف الجرد 📂</option>
+                          </select>
+                          <div className="absolute left-1.5 top-1/2 -translate-y-1/2 pointer-events-none text-blue-400">
+                            <ChevronDown className="w-2.5 h-2.5" />
+                          </div>
+                        </div>
+                    )}
+
+                    {(user.role === 'warehouse_supervisor' || user.role === 'supervisor') && (
+                        <div className="relative h-[26px] flex items-center shrink-0">
+                          <select 
+                            value={activeSupervisorTab}
+                            onChange={(e) => setActiveSupervisorTab(e.target.value as any)}
+                            className="pl-6 pr-1.5 py-0 bg-blue-50 border border-blue-100 rounded-lg text-[9px] font-black text-blue-700 focus:ring-1 focus:ring-blue-500/20 focus:border-blue-400 outline-none appearance-none cursor-pointer text-right transition-all h-[26px] w-[105px] min-w-[105px] max-w-[105px]"
+                          >
+                            <option value="none">خيارات مشرف</option>
+                            <option value="sheet">جرد الاصناف 📋</option>
+                            <option value="archive">ارشيف الجرد 📂</option>
+                          </select>
+                          <div className="absolute left-1.5 top-1/2 -translate-y-1/2 pointer-events-none text-blue-400">
+                            <ChevronDown className="w-2.5 h-2.5" />
+                          </div>
+                        </div>
+                    )}
+
+                    {user.role === 'stores_manager' && (
+                        <div className="relative h-[26px] flex items-center shrink-0 z-50">
+                          <select 
+                            value={activeSupervisorTab}
+                            onChange={(e) => setActiveSupervisorTab(e.target.value as any)}
+                            className="pl-6 pr-1.5 py-0 bg-indigo-50 border border-indigo-100 rounded-lg text-[9px] font-black text-indigo-700 focus:ring-1 focus:ring-indigo-500/20 focus:border-indigo-400 outline-none appearance-none cursor-pointer text-right transition-all h-[26px] w-[115px] min-w-[115px] max-w-[115px]"
+                          >
+                            <option value="none">خيارات مدير</option>
+                            <option value="archive">ارشيف الجرد 📂</option>
+                            <option value="manager_dashboard">تحليلات وتقييم 📊</option>
+                          </select>
+                          <div className="absolute left-1.5 top-1/2 -translate-y-1/2 pointer-events-none text-indigo-400">
+                            <ChevronDown className="w-2.5 h-2.5" />
+                          </div>
+                        </div>
+                    )}
+
+                    {user.role === 'storekeeper' && (
+                        <div className="relative h-[26px] flex items-center shrink-0">
+                          <select 
+                            value={activeStorekeeperTab}
+                            onChange={(e) => setActiveStorekeeperTab(e.target.value as any)}
+                            className="pl-6 pr-1.5 py-0 bg-emerald-50 border border-emerald-100 rounded-lg text-[9px] font-black text-emerald-700 focus:ring-1 focus:ring-emerald-500/20 focus:border-emerald-400 outline-none appearance-none cursor-pointer text-right transition-all h-[26px] w-[105px] min-w-[105px] max-w-[105px]"
+                          >
+                            <option value="none">خيارات امين</option>
+                            <option value="sheet">جرد المخازن 📋</option>
+                            <option value="archive">ارشيف الجرد 📂</option>
+                          </select>
+                          <div className="absolute left-1.5 top-1/2 -translate-y-1/2 pointer-events-none text-emerald-400">
+                            <ChevronDown className="w-2.5 h-2.5" />
+                          </div>
+                        </div>
+                    )}
+
+                    <button
+                        type="button"
+                        onClick={openEditProfileModal}
+                        className="w-[26px] h-[26px] flex items-center justify-center border border-emerald-250 hover:bg-emerald-50 hover:text-emerald-850 text-emerald-700 bg-white rounded-md transition-all shadow-3xs cursor-pointer shrink-0"
+                        title="تعديل البيانات الشخصية"
+                    >
+                        <Settings className="w-3.5 h-3.5 text-emerald-650" />
+                    </button>
+                </div>
+
+              </div>
+
+              {/* Bottom Row: Right Info (Role) & Left Actions (Save, Date, Logout) */}
+              <div className="flex items-center justify-between w-full px-1 mt-0">
+                
+                {/* Right side info (Bottom Row) - Role */}
+                <div className="flex-grow text-[9.5px] sm:text-[10.5px] font-extrabold text-blue-700 leading-normal text-right truncate" title="الوظيفة">

@@ -1,7 +1,7 @@
 import { dbService } from "../database/dbService";
 import { AuditService } from "./auditService";
 import { FirebaseBackupService } from "./firebaseBackupService";
-import { getFirestoreApiDisabled, deleteFirestoreDoc, getAppEnv, requestEnvStorage } from "./firestoreService";
+import { getFirestoreApiDisabled, deleteFirestoreDoc, setFirestoreDoc, getAppEnv, requestEnvStorage } from "./firestoreService";
 import bcrypt from "bcryptjs";
 import fs from "fs";
 import path from "path";
@@ -132,7 +132,7 @@ export class SessionService {
   }
 
   // Save partial or complete application state updates with atomicity & strict server-side RBAC validation
-  public static saveState(incoming: any, actorCode?: string, clientIp?: string) {
+  public static async saveState(incoming: any, actorCode?: string, clientIp?: string) {
     let oldSnapshotsCount = 0;
     try {
       const countRes = dbService.queryOne("SELECT count(*) as count FROM inventory_snapshots") as { count: number };
@@ -143,6 +143,23 @@ export class SessionService {
 
     let newSnapshotAdded = false;
     let snapshotDeleted = false;
+
+    const pendingCloudDeletes: { sessionId: string; stubData: string; deletedReason: string | null }[] = [];
+
+    // Try to fetch real session data from Firestore before creating a stub
+    let realSessionData: any = null;
+    if (incoming.pastSessions !== undefined && incoming.deletedPastSessionId !== undefined) {
+      const deleteIdStr = String(incoming.deletedPastSessionId);
+      const snap = dbService.queryOne("SELECT * FROM inventory_snapshots WHERE session_id = ?", [deleteIdStr]);
+      if (!snap) {
+        try {
+          const { getFirestoreDoc } = await import("./firestoreService");
+          realSessionData = await getFirestoreDoc("inventory_snapshots", deleteIdStr);
+        } catch (fsErr) {
+          console.warn("Could not fetch from Firestore for delete stub:", fsErr);
+        }
+      }
+    }
 
     const success = dbService.transaction(() => {
       // Load current actor's details to enforce secure Role-Based Access Control using LOWER(code) for case-insensitive matching
@@ -272,15 +289,21 @@ export class SessionService {
               const isExplicitDelete = incoming.deletedActiveSessionId !== undefined && String(incoming.deletedActiveSessionId) === String(currentActive.id);
               if (isExplicitDelete) {
                 // Save to deleted_sessions
+                const activeStubData = JSON.stringify({ ...currentActive, type: "active", deletedReason: incoming.deletedReason || incoming.metadata?.deletedReason });
                 dbService.run(`
                   INSERT INTO deleted_sessions (session_id, deleted_at, session_data, deleted_reason)
                   VALUES (?, ?, ?, ?)
                 `, [
                   String(currentActive.id || "deleted_active"),
                   new Date().toISOString(),
-                  JSON.stringify({ ...currentActive, type: "active", deletedReason: incoming.deletedReason || incoming.metadata?.deletedReason }),
+                  activeStubData,
                   incoming.deletedReason || incoming.metadata?.deletedReason || null
                 ]);
+                pendingCloudDeletes.push({
+                  sessionId: String(currentActive.id || "deleted_active"),
+                  stubData: activeStubData,
+                  deletedReason: incoming.deletedReason || incoming.metadata?.deletedReason || null
+                });
                 snapshotDeleted = true;
                 dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedDeletedSessions', ?)", [Date.now().toString()]);
                 AuditService.log(
@@ -494,30 +517,45 @@ export class SessionService {
             const snap = dbService.queryOne("SELECT * FROM inventory_snapshots WHERE session_id = ?", [deleteIdStr]);
             if (snap) {
               const snapshotObj = JSON.parse(snap.snapshot_data);
+              const stubData = JSON.stringify({ ...snapshotObj, type: "archived", deletedReason: incoming.deletedReason || incoming.metadata?.deletedReason });
               dbService.run(`
                 INSERT INTO deleted_sessions (session_id, deleted_at, session_data, deleted_reason)
                 VALUES (?, ?, ?, ?)
               `, [
                 deleteIdStr,
                 new Date().toISOString(),
-                JSON.stringify({ ...snapshotObj, type: "archived", deletedReason: incoming.deletedReason || incoming.metadata?.deletedReason }),
+                stubData,
                 incoming.deletedReason || incoming.metadata?.deletedReason || null
               ]);
+              pendingCloudDeletes.push({
+                sessionId: deleteIdStr,
+                stubData: stubData,
+                deletedReason: incoming.deletedReason || incoming.metadata?.deletedReason || null
+              });
               dbService.run("DELETE FROM inventory_snapshots WHERE session_id = ?", [deleteIdStr]);
               snapshotDeleted = true;
               dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedPastSessions', ?)", [Date.now().toString()]);
             } else {
               // Stub insert for deleted_sessions when deleting something that wasn't in local SQLite cache
               // This is crucial to prevent the session from ever returning on subsequent Firestore background downloads
+              const stubData = realSessionData ?
+                JSON.stringify({ ...realSessionData, type: "archived", deletedReason: incoming.deletedReason }) :
+                JSON.stringify({ id: deleteIdStr, type: "archived", items: [], notes: "Deleted from cloud sync" });
+
               dbService.run(`
                 INSERT INTO deleted_sessions (session_id, deleted_at, session_data, deleted_reason)
                 VALUES (?, ?, ?, ?)
               `, [
                 deleteIdStr,
                 new Date().toISOString(),
-                JSON.stringify({ id: deleteIdStr, type: "archived", date: new Date().toISOString().slice(0, 10), items: [], notes: "Deleted snapshot" }),
-                incoming.deletedReason || incoming.metadata?.deletedReason || "Deleted directly from Cloud sync"
+                stubData,
+                incoming.deletedReason || incoming.metadata?.deletedReason || null
               ]);
+              pendingCloudDeletes.push({
+                sessionId: deleteIdStr,
+                stubData: stubData,
+                deletedReason: incoming.deletedReason || incoming.metadata?.deletedReason || null
+              });
               dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedDeletedSessions', ?)", [Date.now().toString()]);
             }
 
@@ -637,7 +675,27 @@ export class SessionService {
     });
 
     if (success) {
-      this.writeDurableCheckpoint();
+      const forceCloud = (incoming.activeSession === null) || 
+                         (incoming.deletedActiveSessionId !== undefined) || 
+                         (incoming.deletedPastSessionId !== undefined);
+      this.writeDurableCheckpoint(forceCloud);
+
+      // Async save deleted sessions to Firestore
+      for (const del of pendingCloudDeletes) {
+        (async () => {
+          try {
+            const { setFirestoreDoc } = await import("./firestoreService");
+            await setFirestoreDoc("deleted_sessions", del.sessionId, {
+              session_id: del.sessionId,
+              deleted_at: new Date().toISOString(),
+              session_data: del.stubData,
+              deleted_reason: del.deletedReason
+            });
+          } catch (e) {
+            console.warn("Could not save deleted session to Firestore:", e);
+          }
+        })();
+      }
 
       // 🛡️ ATOMIC ARCHIVING SHIELD is now managed exclusively by the client via explicit /api/backup 
       // calls after pushStateToServer succeeds. This prevents duplicate cloud backups and saves quota.
@@ -677,19 +735,39 @@ export class SessionService {
       threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
       const isoThreshold = threeDaysAgo.toISOString();
       
-      const rowsToDelete = dbService.query("SELECT id FROM deleted_sessions WHERE deleted_at < ?", [isoThreshold]);
+      const rowsToDelete = dbService.query("SELECT id, session_id FROM deleted_sessions WHERE deleted_at < ?", [isoThreshold]);
       if (rowsToDelete.length > 0) {
         const ids = rowsToDelete.map(r => r.id);
         
         if (!getFirestoreApiDisabled()) {
-          for (const id of ids) {
-            deleteFirestoreDoc("deleted_sessions", String(id)).catch(e => {
-              console.warn(`⚠️ Cloud delete failed for pruned deleted session ${id}:`, e.message);
+          for (const row of rowsToDelete) {
+            const sid = String(row.session_id);
+            // 🛡️ TRIPLE-STRETCH DELETION: Explicitly remove from all possible cloud collections immediately
+            deleteFirestoreDoc("deleted_sessions", sid).catch(e => {
+              console.warn(`⚠️ Cloud delete failed for pruned deleted session ${sid}:`, e.message);
             });
+            deleteFirestoreDoc("deleted_sessions", String(row.id)).catch(() => {});
+            deleteFirestoreDoc("inventory_snapshots", sid).catch(() => {});
+            
+            // Tombstone in Firestore
+            setFirestoreDoc("permanent_tombstones", sid, {
+              session_id: sid,
+              tombstoned_at: new Date().toISOString()
+            }).catch(() => {});
           }
         }
         
-        dbService.run(`DELETE FROM deleted_sessions WHERE id IN (${ids.join(",")})`);
+        // Add to local permanent_tombstones and delete from local SQLite
+        dbService.transaction(() => {
+          for (const row of rowsToDelete) {
+            dbService.run("INSERT OR REPLACE INTO permanent_tombstones (session_id, tombstoned_at) VALUES (?, ?)", [
+              row.session_id,
+              new Date().toISOString()
+            ]);
+          }
+          dbService.run(`DELETE FROM deleted_sessions WHERE id IN (${ids.join(",")})`);
+        });
+        
         console.log(`Pruned ${ids.length} expired deleted sessions (older than 3 days) from SQLite and cloud.`);
       }
     } catch (err) {
@@ -812,7 +890,7 @@ export class SessionService {
   }
 
   // Write a backup of the current database state (Legacy fallback removed)
-  public static writeDurableCheckpoint() {
+  public static writeDurableCheckpoint(forceCloud = false) {
     const env = getAppEnv();
     SessionService.getStateWithPasswordsAsync().then(state => {
       requestEnvStorage.run(env, () => {
@@ -830,8 +908,20 @@ export class SessionService {
           const fifteenMinutes = 15 * 60 * 1000; // 15 minutes in ms
           const timeElapsed = Date.now() - lastSuccess;
 
-          if (timeElapsed >= fifteenMinutes) {
-            FirebaseBackupService.backupStateToCloud(state, false)
+          let shouldForce = forceCloud;
+          if (!state.activeSession) {
+            // Check if local mirror still has an active session. If it does, we MUST force backup to clear it on cloud!
+            try {
+              const mirror = FirebaseBackupService.getLocalMirrorData();
+              if (mirror && mirror.activeSession) {
+                console.log("🛡️ DETECTED ACTIVE SESSION ENDED: Forcing cloud sync to clear active session in Firestore.");
+                shouldForce = true;
+              }
+            } catch (e) {}
+          }
+
+          if (shouldForce || timeElapsed >= fifteenMinutes) {
+            FirebaseBackupService.backupStateToCloud(state, shouldForce)
               .catch(e => console.warn("☁️ Checkpoint cloud sync skipped:", e?.message));
           } else {
             console.log(`☁️ Rate-limiting check: last successful backup was ${Math.round(timeElapsed / 1000)}s ago. Saving to server local mirror only.`);

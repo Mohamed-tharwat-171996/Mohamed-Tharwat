@@ -7,3 +7,13 @@ coverage/
 .env*
 !.env.example
 inventory*.db*
+
+check_*.js
+list_*.js
+query_*.js
+query_*.cjs
+test_*.js
+fix_*.cjs
+wrap_*.cjs
+*_output.txt
+tmp.json

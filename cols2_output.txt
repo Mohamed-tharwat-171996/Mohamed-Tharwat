@@ -1,3 +1,0 @@
---- AI STUDIO DATABASE ---
-users_development: 1
-users_production: 1

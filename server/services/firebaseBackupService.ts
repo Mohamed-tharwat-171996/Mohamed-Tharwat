@@ -151,7 +151,7 @@ export class FirebaseBackupService {
     }
   }
 
-  private static getLocalMirrorData(): any {
+  public static getLocalMirrorData(): any {
     try {
       const mirrorPath = this.getMirrorPath();
       if (fs.existsSync(mirrorPath)) {
@@ -418,12 +418,11 @@ export class FirebaseBackupService {
           console.log(`♻️ Syncing ${state.deletedSessions.length} deleted sessions to [${deletedCollName}]...`);
           
           for (const ds of state.deletedSessions) {
-            if (ds && ds.id) {
-              const dsId = String(ds.id);
+            const dsId = String(ds.sessionId || ds.session_id || ds.id);
+            if (ds && dsId) {
               const dsRef = doc(db, deletedCollName, dsId);
               await withTimeout(setDoc(dsRef, {
-                id: ds.id,
-                session_id: ds.sessionId || ds.session_id,
+                session_id: dsId,
                 deleted_at: ds.deletedAt || ds.deleted_at || new Date().toISOString(),
                 deleted_reason: ds.deletedReason || ds.deleted_reason || null,
                 session_data: typeof ds.sessionData === 'string' ? ds.sessionData : JSON.stringify(ds.sessionData || ds.session_data || {})
@@ -525,7 +524,7 @@ export class FirebaseBackupService {
             deletedSessionCount: localDeletedCount,
             itemCount: mirror.activeSession ? (mirror.activeSession.items || []).length : 0,
             masterItemCount: (mirror.masterItems || []).length,
-            hasActiveSession: !!mirror.activeSession,
+            hasActiveSession: !!(mirror.activeSession && mirror.activeSession.id),
             userCount: (mirror.registeredUsers || []).length,
             history: mirror.history || [],
             storageBytes: localStorageBytes
@@ -563,7 +562,7 @@ export class FirebaseBackupService {
             deletedSessionCount: localDeletedCount,
             itemCount: mirror.activeSession ? (mirror.activeSession.items || []).length : 0,
             masterItemCount: (mirror.masterItems || []).length,
-            hasActiveSession: !!mirror.activeSession,
+            hasActiveSession: !!(mirror.activeSession && mirror.activeSession.id),
             userCount: hasLiveUsersCount ? liveUsersCount : (mirror.registeredUsers || []).length,
             history: mirror.history || [],
             storageBytes: localStorageBytes
@@ -642,7 +641,7 @@ export class FirebaseBackupService {
         deletedSessionCount: deletedSessionCount,
         itemCount: data.activeSession ? (data.activeSession.items || []).length : 0,
         masterItemCount: (data.masterItems || []).length,
-        hasActiveSession: !!data.activeSession,
+        hasActiveSession: !!(data.activeSession && data.activeSession.id),
         userCount: usersCount,
         history: historyList,
         storageBytes: storageBytes
@@ -744,11 +743,15 @@ export class FirebaseBackupService {
         }
       }
 
+      const toDeleteFromCloud: string[] = [];
       // Merge records in a safe transaction - ALWAYS clear and sync even if empty to reflect cloud authority
       dbService.transaction(() => {
         // Clear local cache for this environment before repopulating to ensure 100% sync matching cloud
         dbService.run("DELETE FROM inventory_snapshots"); 
         
+        // Load local permanent tombstones to protect against zombie snapshots
+        const tombstones = dbService.query("SELECT session_id FROM permanent_tombstones").map(r => String(r.session_id));
+
         if (pastSessions.length > 0) {
           const insertSnapshot = dbService.run.bind(dbService, `
             INSERT OR REPLACE INTO inventory_snapshots (session_id, date, notes, created_at, snapshot_data)
@@ -758,8 +761,14 @@ export class FirebaseBackupService {
           for (const sess of pastSessions) {
             const sessId = sess.id || sess.session_id || sess.cloudId;
             if (sess && sessId) {
+              const sessIdStr = String(sessId);
+              if (tombstones.includes(sessIdStr)) {
+                console.log(`🛡️ CLOUD SYNC: Blocked/skipped tombstoned past session [${sessIdStr}] from being repopulated.`);
+                toDeleteFromCloud.push(sessIdStr);
+                continue;
+              }
               insertSnapshot([
-                String(sessId),
+                sessIdStr,
                 sess.date || new Date().toISOString().slice(0, 10),
                 sess.notes || "",
                 sess.createdAt || sess.created_at || new Date().toISOString(),
@@ -769,6 +778,19 @@ export class FirebaseBackupService {
           }
         }
       });
+
+      if (toDeleteFromCloud.length > 0) {
+        try {
+          const { deleteFirestoreDoc } = await import("./firestoreService");
+          for (const sid of toDeleteFromCloud) {
+            console.log(`🛡️ CLOUD PURGE: Explicitly deleting tombstoned snapshot from Firestore for [${sid}]...`);
+            deleteFirestoreDoc("inventory_snapshots", sid).catch(err => {
+              console.warn(`⚠️ Failed to prune tombstoned snapshot ${sid} from Firestore:`, err.message || err);
+            });
+          }
+        } catch (e) {}
+      }
+
       console.log(`☁️ Snapshot Sync: Successfully loaded/updated ${pastSessions.length} archived sessions directly from Firestore.`);
     } catch (err: any) {
       console.warn("⚠️ Background snapshot cloud sync bypassed:", err.message || err);
@@ -785,6 +807,34 @@ export class FirebaseBackupService {
       const db = getFirestoreInstance();
       if (!db) return;
 
+      // 🛡️ FIRST: Synchronize and download permanent tombstones from Firestore to local SQLite
+      try {
+        const tombstonesCollName = resolveCollectionName("permanent_tombstones");
+        console.log(`♻️ CLOUD SYNC: Fetching permanent tombstones from Firestore [${tombstonesCollName}]...`);
+        const tombstonesRef = collection(db, tombstonesCollName);
+        const tombstonesSnapshot = await getDocs(tombstonesRef);
+        if (!tombstonesSnapshot.empty) {
+          dbService.transaction(() => {
+            const insertTombstone = dbService.run.bind(dbService, `
+              INSERT OR REPLACE INTO permanent_tombstones (session_id, tombstoned_at)
+              VALUES (?, ?)
+            `);
+            for (const doc of tombstonesSnapshot.docs) {
+              const rawData = doc.data();
+              if (rawData && rawData.session_id) {
+                insertTombstone([
+                  String(rawData.session_id),
+                  rawData.tombstoned_at || new Date().toISOString()
+                ]);
+              }
+            }
+          });
+          console.log(`♻️ CLOUD SYNC: Loaded/updated ${tombstonesSnapshot.size} permanent tombstones from Firestore.`);
+        }
+      } catch (tombstoneSyncErr: any) {
+        console.warn("⚠️ Background permanent tombstones sync failed:", tombstoneSyncErr.message || tombstoneSyncErr);
+      }
+
       const deletedCollName = resolveCollectionName("deleted_sessions");
       console.log(`♻️ CLOUD SYNC: Fetching deleted sessions from Firestore [${deletedCollName}]...`);
       const deletedRef = collection(db, deletedCollName);
@@ -798,8 +848,7 @@ export class FirebaseBackupService {
           const rawData = doc.data();
           if (!rawData) return null;
           return {
-            id: rawData.id,
-            session_id: rawData.session_id,
+            session_id: rawData.session_id || doc.id,
             deleted_at: rawData.deleted_at || new Date().toISOString(),
             deleted_reason: rawData.deleted_reason || null,
             session_data: typeof rawData.session_data === 'object' ? JSON.stringify(rawData.session_data) : rawData.session_data
@@ -807,22 +856,43 @@ export class FirebaseBackupService {
         }).filter(Boolean);
       }
 
+      const toDeleteFromCloud: string[] = [];
+      const threeDaysAgo = new Date();
+      threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+      const thresholdTime = threeDaysAgo.getTime();
+
       // Merge records in a safe transaction - ALWAYS clear even if empty to reflect cloud authority
       dbService.transaction(() => {
         // Clear local cache for this environment before repopulating to ensure 100% sync matching cloud
         dbService.run("DELETE FROM deleted_sessions");
 
+        // Load local permanent tombstones to protect against zombie deleted sessions
+        const tombstones = dbService.query("SELECT session_id FROM permanent_tombstones").map(r => String(r.session_id));
+
         if (deletedSessions.length > 0) {
           const insertDeleted = dbService.run.bind(dbService, `
-            INSERT OR REPLACE INTO deleted_sessions (id, session_id, deleted_at, session_data, deleted_reason)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO deleted_sessions (session_id, deleted_at, session_data, deleted_reason)
+            VALUES (?, ?, ?, ?)
           `);
 
           for (const del of deletedSessions) {
-            if (del && del.id) {
+            if (del && del.session_id) {
+              const delIdStr = String(del.session_id);
+              
+              const isTombstoned = tombstones.includes(delIdStr);
+              let isOld = false;
+              try {
+                isOld = new Date(del.deleted_at).getTime() < thresholdTime;
+              } catch (e) {}
+
+              if (isTombstoned || isOld) {
+                console.log(`🛡️ CLOUD SYNC: Skipping and queuing cloud deletion for deleted session [${delIdStr}]. Tombstoned: ${isTombstoned}, Older than 3 days: ${isOld}`);
+                toDeleteFromCloud.push(delIdStr);
+                continue;
+              }
+
               insertDeleted([
-                Number(del.id),
-                String(del.session_id),
+                delIdStr,
                 String(del.deleted_at),
                 String(del.session_data),
                 del.deleted_reason || null
@@ -831,6 +901,20 @@ export class FirebaseBackupService {
           }
         }
       });
+
+      if (toDeleteFromCloud.length > 0) {
+        try {
+          const { deleteFirestoreDoc } = await import("./firestoreService");
+          for (const sid of toDeleteFromCloud) {
+            console.log(`🛡️ CLOUD PURGE: Explicitly deleting pruned/tombstoned deleted_session from Firestore for [${sid}]...`);
+            deleteFirestoreDoc("deleted_sessions", sid).catch(err => {
+              console.warn(`⚠️ Failed to prune deleted_session ${sid} from Firestore:`, err.message || err);
+            });
+            deleteFirestoreDoc("deleted_sessions", String(sid)).catch(() => {});
+          }
+        } catch (e) {}
+      }
+
       console.log(`☁️ Deleted Sessions Sync: Successfully loaded/updated ${deletedSessions.length} deleted sessions directly from Firestore.`);
     } catch (err: any) {
       console.warn("⚠️ Background deleted sessions cloud sync bypassed:", err.message || err);
@@ -981,9 +1065,9 @@ export class FirebaseBackupService {
             ]);
           }
 
-          // Update activeSession if present in cloud to prevent unnecessary wipes of local sessions
+          // Update activeSession based on cloud to keep in sync
+          dbService.run("DELETE FROM settings WHERE key = 'activeSession'");
           if (activeSession) {
-            dbService.run("DELETE FROM settings WHERE key = 'activeSession'");
             dbService.run(`
               INSERT OR REPLACE INTO settings (key, value)
               VALUES ('activeSession', ?)
