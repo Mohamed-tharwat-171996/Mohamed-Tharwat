@@ -233,55 +233,54 @@ export function getFirestoreInstance(): Firestore | null {
 }
 
 export function detectEnvironment(req?: any): string {
+  let env = (process.env.APP_ENV || "").trim().toLowerCase();
+  
   // 1. If explicit request is provided, check host and referer
   if (req) {
     const host = String(req.headers?.host || req.get?.('host') || "").toLowerCase();
     const referer = String(req.headers?.referer || req.headers?.referrer || "").toLowerCase();
-    
-    // DEBUG: Logging detection parameters
     const xForwardedHost = String(req.headers?.['x-forwarded-host'] || "").toLowerCase();
-    if (host.includes("ais-") || referer.includes("ais-") || xForwardedHost.includes("ais-")) {
-       console.log(`🔍 [ENV_DEBUG] Host: ${host}, X-Forwarded-Host: ${xForwardedHost}, Referer: ${referer}`);
-    }
 
     if (host.includes("ais-pre") || referer.includes("ais-pre") || xForwardedHost.includes("ais-pre")) {
-      return "production";
-    }
-    if (host.includes("ais-dev") || referer.includes("ais-dev") || xForwardedHost.includes("ais-dev") || host.startsWith("3000-")) {
-      return "development";
-    }
-
-    // Default for deployed Cloud Run apps or other production environments
-    if (host.includes(".run.app") || xForwardedHost.includes(".run.app")) {
-      return "production";
+      env = "production";
+    } else if (host.includes("ais-dev") || referer.includes("ais-dev") || xForwardedHost.includes("ais-dev") || host.startsWith("3000-") || host.includes("localhost") || host.includes("127.0.0.1")) {
+      env = "development";
+    } else if (host.includes(".run.app") || xForwardedHost.includes(".run.app")) {
+      env = "production";
     }
   }
 
-  // 2. Fallback to process.env.APP_ENV if set
-  const env = (process.env.APP_ENV || "").trim().toLowerCase();
   if (env === "production" || env === "preview" || env === "prod") {
     return "production";
   }
-  return "development";
+  if (env === "development" || env === "dev" || env === "local") {
+    return "development";
+  }
+
+  // Strict check: if no valid environment detected, throw error to prevent mixed-data corruption
+  const diag = req ? `Host: ${req.headers?.host}, X-Forwarded-Host: ${req.headers?.['x-forwarded-host']}, Referer: ${req.headers?.referer}` : "No Request Context";
+  console.error(`🛑 CRITICAL ERROR: Environment detection failed. ${diag}. Access denied.`);
+  throw new Error("ENVIRONMENT_UNKNOWN");
 }
 
 export function getAppEnv(): string {
-  // Prefer the active AsyncLocalStorage context if available
-  const store = requestEnvStorage.getStore();
-  if (store) {
-    return store;
+  try {
+    // Prefer the active AsyncLocalStorage context if available
+    const store = requestEnvStorage.getStore();
+    if (store) {
+      return store;
+    }
+    return detectEnvironment();
+  } catch (e) {
+    return "unknown";
   }
-  return detectEnvironment();
 }
 
-/**
- * Robustly retrieves an environment-specific secret.
- * Searches in order: 
- * 1. [ENV]_VAR_NAME (e.g., DEV_JWT_SECRET)
- * 2. VAR_NAME (e.g., JWT_SECRET)
- */
 export function getEnvSecret(key: string): string {
-  const envPrefix = getAppEnv().toUpperCase();
+  const env = getAppEnv();
+  if (env === "unknown") return "";
+  
+  const envPrefix = env.toUpperCase();
   const prefixedKey = `${envPrefix}_${key}`;
   
   const val = process.env[prefixedKey] || process.env[key];
@@ -291,6 +290,69 @@ export function getEnvSecret(key: string): string {
 export function isAppEnvValid(): boolean {
   const env = getAppEnv();
   return env === "production" || env === "development";
+}
+
+export async function checkFirestoreHealth(): Promise<{ connected: boolean; healthy: boolean; reason?: string }> {
+  if (!isFirestoreConfigured()) {
+    return { connected: false, healthy: false, reason: "ملف الإعدادات (firebase-applet-config.json) غير موجود" };
+  }
+  if (isFirestoreApiDisabled) {
+    return { connected: false, healthy: false, reason: isFirestoreApiBlockedByGoogle ? "تم تجاوز حدود استخدام Google API" : "معطل يدوياً أو بسبب أخطاء متكررة" };
+  }
+  
+  const db = getFirestoreInstance();
+  if (!db) {
+    return { connected: false, healthy: false, reason: "فشل تهيئة Firestore (تأكد من صحة الإعدادات)" };
+  }
+
+  try {
+    const testDoc = doc(db, resolveCollectionName("health_check"), "ping");
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error("Timeout")), 3000);
+    });
+    await Promise.race([getDoc(testDoc), timeoutPromise]);
+    return { connected: true, healthy: true };
+  } catch (err: any) {
+    return { connected: true, healthy: false, reason: `خطأ في الاتصال: ${err.message || "Timeout"}` };
+  }
+}
+
+// Unified User Resolver to ensure 100% consistency across login, listing, and activation
+export class UserResolver {
+  public static async getUserByCode(code: string): Promise<any | null> {
+    const codeClean = String(code).trim().toLowerCase();
+    try {
+      const user = await getFirestoreDoc("users", codeClean);
+      return user;
+    } catch (err: any) {
+      const errMsg = err.message || String(err);
+      if (errMsg.includes("Timeout") || errMsg.includes("deadline")) {
+        throw new Error("TIMEOUT");
+      }
+      if (errMsg.includes("unavailable") || errMsg.includes("network")) {
+        throw new Error("UNAVAILABLE");
+      }
+      if (errMsg.includes("permission") || errMsg.includes("denied")) {
+        throw new Error("PERMISSION_DENIED");
+      }
+      throw err;
+    }
+  }
+
+  public static async getAllUsers(): Promise<any[]> {
+    try {
+      const users = await getFirestoreCollection("users");
+      return users || [];
+    } catch (err) {
+      console.error("UserResolver.getAllUsers failed:", err);
+      return [];
+    }
+  }
+
+  public static async saveUser(code: string, userData: any): Promise<void> {
+    const codeClean = String(code).trim().toLowerCase();
+    await setFirestoreDoc("users", codeClean, userData);
+  }
 }
 
 export const COLLECTIONS = {
@@ -372,19 +434,6 @@ export async function _getFirestoreDoc(collectionName: string, docId: string): P
         ...data,
         code: data.code || docId
       };
-    }
-
-    // 🛡️ FALLBACK: If user not found in namespaced collection, try development as it often contains legacy data
-    if (collectionName === "users" && !resolved.includes("development")) {
-      try {
-        const devDocRef = doc(db, "users_development", docId);
-        const devSnap = await getDoc(devDocRef);
-        if (devSnap.exists()) {
-          console.log(`💡 Legacy User Discovery: Found ${docId} in users_development.`);
-          const data = devSnap.data();
-          return { ...data, code: data.code || docId };
-        }
-      } catch (e) {}
     }
     
     return null;
@@ -532,68 +581,54 @@ export async function _getFirestoreCollection(collectionName: string): Promise<a
   if (!db || isFirestoreApiDisabled) return [];
   const resolved = resolveCollectionName(collectionName);
   
-  const attemptFetch = async (targetCollection: string) => {
-    try {
-      const collRef = collection(db, targetCollection);
-      const getDocsPromise = getDocs(collRef);
-      getDocsPromise.catch(() => {});
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error("Timeout")), 8000);
-      });
-      const snap = await Promise.race([getDocsPromise, timeoutPromise]);
-      
-      if (snap && !snap.empty) {
-        return snap.docs.map(d => {
-          const data = d.data();
-          return { ...data, code: data.code || d.id };
-        });
-      }
-      return [];
-    } catch (e) {
-      return [];
-    }
-  };
-
   try {
-    // 1. Try the primary resolved collection
-    let results = await attemptFetch(resolved);
+    const collRef = collection(db, resolved);
+    const getDocsPromise = getDocs(collRef);
+    getDocsPromise.catch(() => {});
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error("Timeout")), 8000);
+    });
+    const snap = await Promise.race([getDocsPromise, timeoutPromise]);
     
-    // 2. If it's the 'users' collection and we got nothing, try common fallbacks
-    if (results.length === 0 && (collectionName === "users" || collectionName === "app_users")) {
-      const env = getAppEnv();
-      const fallbacks = ["users", "app_users", `users_${env}`, `app_users_${env}`].filter(f => f !== resolved);
-      
-      for (const fallback of fallbacks) {
-        results = await attemptFetch(fallback);
-        if (results.length > 0) {
-          console.log(`💡 User Discovery: Found ${results.length} users in fallback collection: ${fallback}`);
-          break;
-        }
-      }
-    }
-
     // Track operation
-    import("./quotaService").then(({ QuotaService }) => {
-      QuotaService.trackOperation(1, 0, 0, "sys", "System Generic Collection Read").catch(() => {});
-    }).catch(() => {});
+    if (snap && !snap.empty) {
+      import("./quotaService").then(({ QuotaService }) => {
+        QuotaService.trackOperation(snap.size, 0, 0, "sys", "System Collection Read").catch(() => {});
+      }).catch(() => {});
+    }
 
     consecutiveFailures = 0;
-    return results;
+    if (snap && !snap.empty) {
+      return snap.docs.map(d => {
+        const data = d.data();
+        return { ...data, code: data.code || d.id };
+      });
+    }
+    return [];
   } catch (err: any) {
-    if (handleBloomFilterFailure(err)) return [];
-    
-    const now = Date.now();
-    lastFailureTime = now;
+    if (err && err.message === "Timeout") {
+      console.warn("⚠️ Firestore collection fetch timed out. Reinitializing connection...");
+      reinitializeFirestore();
+      throw err;
+    }
+
+    const errMsg = String(err.message || err);
+    const isNetworkError = errMsg.includes("network") || errMsg.includes("offline") || errMsg.includes("unavailable") || errMsg.includes("deadline") || errMsg.includes("stream");
+
+    if (isNetworkError) {
+      console.warn(`🌐 Network issue in collection fetch (${errMsg}). Reinitializing Firestore...`);
+      reinitializeFirestore();
+      throw err;
+    }
+
     if (isFirestoreErrorDisabled(err)) {
       isFirestoreApiBlockedByGoogle = true;
       isFirestoreApiDisabled = true;
-      console.warn("☁️ Firestore API is disabled or not activated. Operating in stable local Storage mode.");
-    } else {
-      // For all other errors (timeout, network, etc), just reinitialize but DO NOT DISABLE
-      console.warn(`⚠️ Firestore collection fetch failed: ${err.message || err}. Reinitializing for stability...`);
-      reinitializeFirestore();
+      console.warn("☁️ Firestore API is disabled or not activated. Operating in local mode.");
+      return [];
     }
-    return [];
+
+    throw err;
   }
 }
 

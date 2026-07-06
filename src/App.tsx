@@ -1092,6 +1092,7 @@ export default function App() {
           console.warn(`🛡️ Security Warning: Server sent an activeSession (${sActiveClean.id}) that is already archived. Rejecting parameter.`);
           sActiveClean = null;
         } else {
+          console.log(`✅ Active session ${sActiveClean.id} accepted.`);
           // Backward compatibility: if the session contains assigned items, treat assignments as committed
           if (sActiveClean.assignmentsCommitted === undefined) {
             const hasAssigned = sActiveClean.items?.some((i: any) => i.assignedTo && i.assignedTo !== "عام" && i.assignedTo !== "general");
@@ -4559,10 +4560,38 @@ export default function App() {
                                 حالة النسخة السحابية الحالية بـ Firestore
                               </span>
                               {isCloudSyncAvailable ? (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-750 border border-indigo-100">
-                                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></span>
-                                  مستقر سحابياً
-                                </span>
+                                <div className="flex items-center gap-1.5">
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-750 border border-indigo-100">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></span>
+                                    مستقر سحابياً
+                                  </span>
+                                  <button 
+                                    onClick={async () => {
+                                      if (isRefreshingStatus) return;
+                                      setIsRefreshingStatus(true);
+                                      try {
+                                        const res = await fetch('/api/diagnose');
+                                        const data = await res.json();
+                                        await checkSystemStatus();
+                                        await loadCloudBackupMetadataOnly();
+                                        if (data.status === 'ok') {
+                                          showToast("تم تحديث حالة الاتصال السحابي وفحص المزامنة.", "success");
+                                        } else {
+                                          showToast("فشل تحديث البيانات السحابية: " + (data.error || "خطأ غير معروف"), "error");
+                                        }
+                                      } catch (err) {
+                                        showToast("خطأ في الاتصال بالخادم التشخيصي.", "error");
+                                      } finally {
+                                        setIsRefreshingStatus(false);
+                                      }
+                                    }}
+                                    disabled={isRefreshingStatus}
+                                    className={`p-1 hover:bg-indigo-100 rounded-lg text-indigo-600 transition-all ${isRefreshingStatus ? 'animate-spin opacity-50' : ''}`}
+                                    title="تحديث الحالة وإعادة الاتصال يدوياً"
+                                  >
+                                    <RefreshCw className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
                               ) : (
                                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-100">
                                   <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
@@ -4575,11 +4604,12 @@ export default function App() {
                                         const res = await fetch('/api/diagnose');
                                         const data = await res.json();
                                         await checkSystemStatus();
+                                        await loadCloudBackupMetadataOnly();
                                         
                                         if (data.status === 'ok') {
-                                          showToast("تم إعادة فحص حالة الاتصال السحابي بنجاح.", "success");
+                                          showToast("تمت محاولة إعادة الاتصال بنجاح وتنشيط السحاب.", "success");
                                         } else {
-                                          showToast("فشل إعادة فحص بيانات السحاب.", "error");
+                                          showToast("فشل تفعيل السحاب: " + (data.error || "تأكد من إعدادات Firebase"), "error");
                                         }
                                       } catch (err) {
                                         showToast("حدث خطأ أثناء محاولة الاتصال بالسيرفر السحابي.", "error");
@@ -4591,7 +4621,7 @@ export default function App() {
                                     className={`ml-1 border-l border-rose-200 pl-1 hover:text-rose-900 cursor-pointer ${isRefreshingStatus ? 'animate-spin opacity-50' : ''}`}
                                     title="إعادة محاولة التفعيل"
                                   >
-                                    🔄
+                                    <RefreshCw className="w-3.5 h-3.5" />
                                   </button>
                                 </span>
                               )}
@@ -5643,9 +5673,16 @@ export default function App() {
               <div className="flex items-center justify-between w-full px-1 bg-transparent border-0 mt-0">
                 
                 {/* Right side info (Top Row) */}
-                <span className="flex-grow text-[12.5px] sm:text-[13.5px] font-black text-emerald-600 leading-none text-right truncate" title={user.name}>
-                  {user.name}
-                </span>
+                <div className="flex flex-col items-start gap-1.5 py-0.5">
+                  <span className="text-[12.5px] sm:text-[13.5px] font-black text-emerald-600 leading-normal text-right truncate" title={user.name}>
+                    {user.name}
+                  </span>
+                  {activeSession ? (
+                      <span className="text-[8px] bg-emerald-100 text-emerald-800 px-1 rounded" title={`جلسة نشطة: ${activeSession.id}`}>جلسة: {activeSession.id}</span>
+                  ) : user.role !== 'stores_manager' ? (
+                      <span className="text-[8px] bg-rose-100 text-rose-800 px-1 rounded">لا توجد جلسة</span>
+                  ) : null}
+                </div>
 
                 {/* Left side actions (Top Row) - In RTL, placed after info so they render on the left */}
                 <div className="flex items-center justify-end gap-1.5 shrink-0 pl-1 z-50 pointer-events-auto">
@@ -5733,7 +5770,7 @@ export default function App() {
               <div className="flex items-center justify-between w-full px-1 mt-0">
                 
                 {/* Right side info (Bottom Row) - Role */}
-                <div className="flex-grow text-[9.5px] sm:text-[10.5px] font-extrabold text-blue-700 leading-none text-right truncate" title="الوظيفة">
+                <div className="flex-grow text-[9.5px] sm:text-[10.5px] font-extrabold text-blue-700 leading-normal text-right truncate" title="الوظيفة">
                    {user.role === 'general_manager' && "المدير العام 💎"}
                    {user.role === 'system_admin' && "مسئول النظام ⚙️"}
                    {user.role === 'program_manager' && "مسئول البرنامج 📊"}

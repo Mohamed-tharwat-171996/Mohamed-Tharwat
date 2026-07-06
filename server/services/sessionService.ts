@@ -32,9 +32,30 @@ function mergeStorekeeperModifications(existing: any[] | undefined, incoming: an
 }
 
 export class SessionService {
-  // Read and compile entire application state object for total client compatibility (Safe: No passwords leaked)
+  private static cachedState: any = null;
+  private static lastMasterTimestamp: number = 0;
+  private static lastActiveSessionTimestamp: number = 0;
+  private static lastPastSessionsTimestamp: number = 0;
+  private static lastDeletedSessionsTimestamp: number = 0;
+
   public static getState() {
-    return dbService.transaction(() => {
+    const timestamps = dbService.query("SELECT key, value FROM settings WHERE key IN ('lastUpdatedMaster', 'lastUpdatedActiveSession', 'lastUpdatedPastSessions', 'lastUpdatedDeletedSessions')");
+    const tsMap = new Map(timestamps.map(t => [t.key, Number(t.value || 0)]));
+    
+    const currentMasterTs = tsMap.get('lastUpdatedMaster') || 0;
+    const currentActiveTs = tsMap.get('lastUpdatedActiveSession') || 0;
+    const currentPastTs = tsMap.get('lastUpdatedPastSessions') || 0;
+    const currentDeletedTs = tsMap.get('lastUpdatedDeletedSessions') || 0;
+
+    if (this.cachedState && 
+        this.lastMasterTimestamp === currentMasterTs &&
+        this.lastActiveSessionTimestamp === currentActiveTs &&
+        this.lastPastSessionsTimestamp === currentPastTs &&
+        this.lastDeletedSessionsTimestamp === currentDeletedTs) {
+      return this.cachedState;
+    }
+
+    this.cachedState = dbService.transaction(() => {
       // 2. Load inventory master catalog items
       const dbItems = dbService.query("SELECT * FROM inventory ORDER BY sort_order ASC");
       const masterItems = dbItems.map((i) => ({
@@ -50,17 +71,14 @@ export class SessionService {
       const activeSessSetting = dbService.queryOne("SELECT value FROM settings WHERE key = 'activeSession'");
       const activeSession = activeSessSetting ? JSON.parse(activeSessSetting.value) : null;
 
-      // 4. Load past sessions limit 200 (Memory safety: prevents OOM on large datasets)
+      // 4. Load past sessions limit 200
       const dbSnapshots = dbService.query("SELECT snapshot_data FROM inventory_snapshots ORDER BY date DESC, created_at DESC LIMIT 200");
       const pastSessions = dbSnapshots.map((row) => {
         const data = JSON.parse(row.snapshot_data);
-        if (data && data.session && typeof data.session === 'object' && (data.session.items || data.session.snapshot_data)) {
-          return data.session;
-        }
-        return data;
+        return (data && data.session && (data.session.items || data.session.snapshot_data)) ? data.session : data;
       });
 
-      // 4.5 Load deleted sessions for recycle bin (Admins only)
+      // 4.5 Load deleted sessions
       const dbDeleted = dbService.query("SELECT * FROM deleted_sessions ORDER BY deleted_at DESC LIMIT 50");
       const deletedSessions = dbDeleted.map(row => ({
         id: row.id,
@@ -70,11 +88,7 @@ export class SessionService {
         sessionData: JSON.parse(row.session_data)
       }));
 
-      // 5. Load stored lastUpdated from settings, defaulting to 0 if not present
-      const lastUpdatedRow = dbService.queryOne("SELECT value FROM settings WHERE key = 'lastUpdated'");
-      const lastUpdated = lastUpdatedRow ? Number(lastUpdatedRow.value) : 0;
-
-      // 6. Load isFirebaseSyncDisabled from settings
+      // 6. Load isFirebaseSyncDisabled
       const syncDisabledRow = dbService.queryOne("SELECT value FROM settings WHERE key = 'isFirebaseSyncDisabled'");
       const isFirebaseSyncDisabled = syncDisabledRow ? syncDisabledRow.value === "true" : false;
 
@@ -84,9 +98,15 @@ export class SessionService {
         pastSessions,
         deletedSessions,
         isFirebaseSyncDisabled,
-        lastUpdated,
+        lastUpdated: Math.max(currentMasterTs, currentActiveTs, currentPastTs, currentDeletedTs),
       };
     });
+    
+    this.lastMasterTimestamp = currentMasterTs;
+    this.lastActiveSessionTimestamp = currentActiveTs;
+    this.lastPastSessionsTimestamp = currentPastTs;
+    this.lastDeletedSessionsTimestamp = currentDeletedTs;
+    return this.cachedState;
   }
 
   public static clearInventory() {
@@ -95,7 +115,19 @@ export class SessionService {
       dbService.run("DELETE FROM inventory_snapshots");
       dbService.run("DELETE FROM deleted_sessions");
       dbService.run("DELETE FROM settings WHERE key = 'activeSession'");
-      dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ["lastUpdated", Date.now().toString()]);
+      const now = Date.now();
+      dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedMaster', ?)", [now.toString()]);
+      dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedActiveSession', ?)", [now.toString()]);
+      dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedPastSessions', ?)", [now.toString()]);
+      dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedDeletedSessions', ?)", [now.toString()]);
+    });
+  }
+
+  public static clearActiveSession() {
+    dbService.transaction(() => {
+      dbService.run("DELETE FROM settings WHERE key = 'activeSession'");
+      const now = Date.now();
+      dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedActiveSession', ?)", [now.toString()]);
     });
   }
 
@@ -204,6 +236,7 @@ export class SessionService {
 
         // Update incoming.masterItems array so that we can distribute this exact pristine-ordered copy to all users
         incoming.masterItems = finalItemsToSave;
+        dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedMaster', ?)", [Date.now().toString()]);
 
         AuditService.log(
           actorCode || "SYSTEM",
@@ -249,6 +282,7 @@ export class SessionService {
                   incoming.deletedReason || incoming.metadata?.deletedReason || null
                 ]);
                 snapshotDeleted = true;
+                dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedDeletedSessions', ?)", [Date.now().toString()]);
                 AuditService.log(
                   actorCode || "SYSTEM",
                   "تعديل الجرد",
@@ -439,6 +473,7 @@ export class SessionService {
             INSERT OR REPLACE INTO settings (key, value)
             VALUES ('activeSession', ?)
           `, [JSON.stringify(incoming.activeSession)]);
+          dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedActiveSession', ?)", [Date.now().toString()]);
         }
       }
 
@@ -470,6 +505,7 @@ export class SessionService {
               ]);
               dbService.run("DELETE FROM inventory_snapshots WHERE session_id = ?", [deleteIdStr]);
               snapshotDeleted = true;
+              dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedPastSessions', ?)", [Date.now().toString()]);
             } else {
               // Stub insert for deleted_sessions when deleting something that wasn't in local SQLite cache
               // This is crucial to prevent the session from ever returning on subsequent Firestore background downloads
@@ -482,6 +518,7 @@ export class SessionService {
                 JSON.stringify({ id: deleteIdStr, type: "archived", date: new Date().toISOString().slice(0, 10), items: [], notes: "Deleted snapshot" }),
                 incoming.deletedReason || incoming.metadata?.deletedReason || "Deleted directly from Cloud sync"
               ]);
+              dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedDeletedSessions', ?)", [Date.now().toString()]);
             }
 
             // Explicitly prune from cloud to ensure it doesn't return on next sync
@@ -557,6 +594,7 @@ export class SessionService {
                 new Date().toISOString(),
                 JSON.stringify(finalSessToSave),
               ]);
+              dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedPastSessions', ?)", [Date.now().toString()]);
 
               AuditService.log(
                 actorCode || "SYSTEM",
@@ -578,6 +616,7 @@ export class SessionService {
                 sess.date || new Date().toISOString().slice(0, 10),
                 sessId
               ]);
+              dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedPastSessions', ?)", [Date.now().toString()]);
 
               console.log(`🔄 Updated existing archived session ID (${sessId}) with fresh edits.`);
             }
@@ -702,9 +741,19 @@ export class SessionService {
     }
   }
 
+  private static cachedWithPasswords: any = null;
+  private static lastCachedPasswordsTimestamp: number = 0;
+
   // ✅ New helper: State backup including password hashes for secure Firestore reconstruction
   public static getStateWithPasswords() {
-    return dbService.transaction(() => {
+    const lastUpdatedRow = dbService.queryOne("SELECT value FROM settings WHERE key = 'lastUpdated'");
+    const currentLastUpdated = lastUpdatedRow ? Number(lastUpdatedRow.value) : 0;
+
+    if (this.cachedWithPasswords && this.lastCachedPasswordsTimestamp === currentLastUpdated) {
+      return this.cachedWithPasswords;
+    }
+
+    this.cachedWithPasswords = dbService.transaction(() => {
       const dbItems = dbService.query("SELECT * FROM inventory ORDER BY sort_order ASC");
       const masterItems = dbItems.map((i: any) => ({
         id: i.id,
@@ -740,15 +789,26 @@ export class SessionService {
         sessionData: JSON.parse(row.session_data)
       }));
 
+      // 🛡️ Include permanent tombstones
+      const dbTombstones = dbService.query("SELECT * FROM permanent_tombstones");
+      const permanentTombstones = dbTombstones.map((row: any) => ({
+        sessionId: row.session_id,
+        tombstonedAt: row.tombstoned_at
+      }));
+
       return {
         masterItems,
         activeSession,
         pastSessions,
         registeredUsers,
         deletedSessions,
-        lastUpdated: Date.now(),
+        permanentTombstones,
+        lastUpdated: currentLastUpdated,
       };
     });
+
+    this.lastCachedPasswordsTimestamp = currentLastUpdated;
+    return this.cachedWithPasswords;
   }
 
   // Write a backup of the current database state (Legacy fallback removed)

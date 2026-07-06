@@ -25,6 +25,12 @@ export class QuotaService {
   private static readonly FETCH_INTERVAL = 30000; // 30 seconds cache for reading global quota
   private static metricClient: MetricServiceClient | null = null;
   private static gcpMonitoringDisabled = false; // Enabled to attempt fetching live metrics
+  private static pendingReads = 0;
+  private static pendingWrites = 0;
+  private static pendingDeletes = 0;
+  private static pendingUserStats: Record<string, { name: string, reads: number, writes: number, deletes: number }> = {};
+  private static flushTimer: NodeJS.Timeout | null = null;
+  private static readonly FLUSH_INTERVAL = 60000; // Flush every 60 seconds
 
   private static getProjectId(): string | null {
     try {
@@ -156,10 +162,50 @@ export class QuotaService {
   }
 
   /**
-   * Tracks a Firestore operation globally.
-   * This itself consumes 1 write, but allows all users to see exactly how much quota is left.
+   * Tracks a Firestore operation globally using a local buffer to prevent document contention.
    */
   public static async trackOperation(reads: number, writes: number, deletes: number, actorCode: string, actorName: string) {
+    this.pendingReads += reads;
+    this.pendingWrites += writes;
+    this.pendingDeletes += deletes;
+
+    if (actorCode && actorCode !== "UNKNOWN" && actorCode !== "sys") {
+      if (!this.pendingUserStats[actorCode]) {
+        this.pendingUserStats[actorCode] = { name: actorName || actorCode, reads: 0, writes: 0, deletes: 0 };
+      }
+      this.pendingUserStats[actorCode].reads += reads;
+      this.pendingUserStats[actorCode].writes += writes;
+      this.pendingUserStats[actorCode].deletes += deletes;
+    }
+
+    // Start flush timer if not already running
+    if (!this.flushTimer) {
+      this.flushTimer = setTimeout(() => this.flush(), this.FLUSH_INTERVAL);
+    }
+  }
+
+  /**
+   * Flushes pending quota updates to Firestore.
+   */
+  public static async flush() {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+
+    const reads = this.pendingReads;
+    const writes = this.pendingWrites;
+    const deletes = this.pendingDeletes;
+    const userStats = { ...this.pendingUserStats };
+
+    if (reads === 0 && writes === 0 && deletes === 0) return;
+
+    // Reset counters immediately to avoid double counting during the async flush
+    this.pendingReads = 0;
+    this.pendingWrites = 0;
+    this.pendingDeletes = 0;
+    this.pendingUserStats = {};
+
     const db = getFirestoreDB();
     if (!db) return;
 
@@ -168,25 +214,27 @@ export class QuotaService {
     const docRef = doc(db, resolvedColl, today);
 
     try {
-      // Use atomic increments
       const updateData: any = {
         reads: increment(reads),
-        writes: increment(writes + 1), // Count this tracking write itself!
+        writes: increment(writes + 1), // Count the flush write itself
         deletes: increment(deletes),
         updatedAt: Date.now()
       };
 
-      // Also track per-user consumption
-      if (actorCode && actorCode !== "UNKNOWN" && actorCode !== "sys") {
-        updateData[`users.${actorCode}.name`] = actorName || actorCode;
-        updateData[`users.${actorCode}.reads`] = increment(reads);
-        updateData[`users.${actorCode}.writes`] = increment(writes + 1);
-        updateData[`users.${actorCode}.deletes`] = increment(deletes);
+      for (const [code, stats] of Object.entries(userStats)) {
+        updateData[`users.${code}.name`] = stats.name;
+        updateData[`users.${code}.reads`] = increment(stats.reads);
+        updateData[`users.${code}.writes`] = increment(stats.writes);
+        updateData[`users.${code}.deletes`] = increment(stats.deletes);
       }
 
-      // Add a small 10s timeout to quota tracking so it never blocks the main backup logic
-      const quotaTimeout = 10000;
-      
+      // 15s timeout for flush
+      const flushTimeout = 15000;
+      let timeoutId: any;
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error("Quota flush timed out")), flushTimeout);
+      });
+
       const doUpdate = async () => {
         try {
           await updateDoc(docRef, updateData);
@@ -197,16 +245,8 @@ export class QuotaService {
               writes: writes + 1,
               deletes,
               updatedAt: Date.now(),
-              users: {}
+              users: userStats
             };
-            if (actorCode && actorCode !== "UNKNOWN" && actorCode !== "sys") {
-              initialData.users[actorCode] = {
-                name: actorName || actorCode,
-                reads,
-                writes: writes + 1,
-                deletes
-              };
-            }
             await setDoc(docRef, initialData);
           } else {
             throw err;
@@ -214,18 +254,35 @@ export class QuotaService {
         }
       };
 
-      let timeoutId: any;
-      const timeoutPromise = new Promise((_, reject) => {
-        timeoutId = setTimeout(() => reject(new Error("Quota operation timed out")), quotaTimeout);
-      });
-
       await Promise.race([
         doUpdate().then(() => clearTimeout(timeoutId)),
         timeoutPromise
       ]);
 
     } catch (err: any) {
-      console.warn("⚠️ QuotaService trackOperation failed:", err.message);
+      // On failure, re-add the values back to the buffer to retry later
+      this.pendingReads += reads;
+      this.pendingWrites += writes;
+      this.pendingDeletes += deletes;
+      for (const [code, stats] of Object.entries(userStats)) {
+        if (!this.pendingUserStats[code]) {
+          this.pendingUserStats[code] = stats;
+        } else {
+          this.pendingUserStats[code].reads += stats.reads;
+          this.pendingUserStats[code].writes += stats.writes;
+          this.pendingUserStats[code].deletes += stats.deletes;
+        }
+      }
+      
+      // If it failed with a timeout, be quiet about it
+      if (err.message !== "Quota flush timed out") {
+        console.warn("⚠️ QuotaService flush failed:", err.message);
+      }
+      
+      // Reschedule flush
+      if (!this.flushTimer) {
+        this.flushTimer = setTimeout(() => this.flush(), this.FLUSH_INTERVAL);
+      }
     }
   }
 

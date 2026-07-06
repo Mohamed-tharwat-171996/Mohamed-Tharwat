@@ -669,6 +669,7 @@ export default function StoresManagerDashboard({
         supervisorName: item.inventoriedByName || "مشرف",
         modifications: itemModifications,
         sessionName: item.sessionName,
+        sessionId: item.sessionId,
         note: item.note || item.notes || "",
         modification: item.modification || "",
         versionNumber: itemVersionNum,
@@ -1800,23 +1801,30 @@ export default function StoresManagerDashboard({
                                                 className="bg-white px-3 py-1.5 rounded-lg border border-slate-150 flex items-center justify-between text-[10px] hover:bg-slate-50/50 transition-colors"
                                               >
                                                 <div className="flex items-center gap-3">
-                                                  <span className="font-mono text-[9px] text-indigo-950 font-black flex items-center gap-1">
-                                                    <Clock className="w-3 h-3 text-slate-400" />
-                                                    {h.displayDate || h.date}
-                                                    {h.date && h.date.includes("T") && (
-                                                      <span className="text-[8px] opacity-60 ml-0.5">
-                                                        ({new Date(h.date).toLocaleTimeString('ar-EG', {hour: '2-digit', minute:'2-digit'})})
+                                                  <div className="flex flex-col gap-0.5">
+                                                    <span className="font-mono text-[9px] text-indigo-950 font-black flex items-center gap-1">
+                                                      <Clock className="w-3 h-3 text-slate-400" />
+                                                      {h.displayDate || h.date}
+                                                    </span>
+                                                    <span className="font-mono text-[8px] text-slate-500 font-bold flex items-center gap-1">
+                                                      أرشفة: {new Date(h.date).toLocaleString('ar-EG', {
+                                                        year: 'numeric',
+                                                        month: 'numeric',
+                                                        day: 'numeric',
+                                                        hour: '2-digit',
+                                                        minute: '2-digit',
+                                                        hour12: true
+                                                      })}
+                                                    </span>
+                                                    <span className="text-slate-400 font-bold truncate max-w-[120px]" title={h.sessionName}>
+                                                      {h.sessionName}
+                                                    </span>
+                                                    {h.versionNumber && (
+                                                      <span className="bg-emerald-50 text-emerald-700 border border-emerald-150 px-1.5 py-0.5 rounded text-[8px] font-black leading-none shrink-0 w-fit" title={`نسخة جرد رقم ${h.versionNumber}`}>
+                                                        نسخة: {h.versionNumber} {h.sessionId ? `(${h.sessionId})` : ''}
                                                       </span>
                                                     )}
-                                                  </span>
-                                                  <span className="text-slate-400 font-bold truncate max-w-[120px]" title={h.sessionName}>
-                                                    {h.sessionName}
-                                                  </span>
-                                                  {h.versionNumber && (
-                                                    <span className="bg-emerald-50 text-emerald-700 border border-emerald-150 px-1.5 py-0.5 rounded text-[8px] font-black leading-none shrink-0" title={`نسخة جرد رقم ${h.versionNumber}`}>
-                                                      {h.versionNumber}
-                                                    </span>
-                                                  )}
+                                                  </div>
                                                 </div>
                                                 
                                                 <div className="flex-1 flex items-center justify-between gap-4 mr-4">

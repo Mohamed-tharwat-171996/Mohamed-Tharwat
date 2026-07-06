@@ -415,7 +415,7 @@ export class FirebaseBackupService {
         // 🗑️ SYNC DELETED SESSIONS INDIVIDUALLY:
         if (state.deletedSessions && Array.isArray(state.deletedSessions)) {
           const deletedCollName = resolveCollectionName("deleted_sessions");
-          console.log(`🗑️ Syncing ${state.deletedSessions.length} deleted sessions to [${deletedCollName}]...`);
+          console.log(`♻️ Syncing ${state.deletedSessions.length} deleted sessions to [${deletedCollName}]...`);
           
           for (const ds of state.deletedSessions) {
             if (ds && ds.id) {
@@ -428,6 +428,24 @@ export class FirebaseBackupService {
                 deleted_reason: ds.deletedReason || ds.deleted_reason || null,
                 session_data: typeof ds.sessionData === 'string' ? ds.sessionData : JSON.stringify(ds.sessionData || ds.session_data || {})
               }, { merge: true }), 5000, `sync-deleted-${dsId}`);
+              writeCount++;
+            }
+          }
+        }
+
+        // 🛡️ SYNC PERMANENT TOMBSTONES INDIVIDUALLY:
+        if (state.permanentTombstones && Array.isArray(state.permanentTombstones)) {
+          const tombstonesCollName = resolveCollectionName("permanent_tombstones");
+          console.log(`🛡️ Syncing ${state.permanentTombstones.length} tombstones to [${tombstonesCollName}]...`);
+          
+          for (const ts of state.permanentTombstones) {
+            if (ts && ts.sessionId) {
+              const tsId = String(ts.sessionId);
+              const tsRef = doc(db, tombstonesCollName, tsId);
+              await withTimeout(setDoc(tsRef, {
+                session_id: ts.sessionId,
+                tombstoned_at: ts.tombstonedAt
+              }, { merge: true }), 5000, `sync-tombstone-${tsId}`);
               writeCount++;
             }
           }
@@ -1290,13 +1308,13 @@ export class FirebaseBackupService {
       if (getFirestoreApiDisabled()) return;
       if (!isAppEnvValid()) return;
 
-      const { getFirestoreDoc, setFirestoreDoc } = await import("./firestoreService");
-      const cloudGM = await getFirestoreDoc("users", "18");
+      const { UserResolver } = await import("./firestoreService");
+      const cloudGM = await UserResolver.getUserByCode("18");
       
       if (!cloudGM) {
         console.log("🚀 Recovery Account Check: Master account (code 18) missing in Cloud. Re-seeding securely...");
         const securePass = bcrypt.hashSync("171996", 10);
-        await setFirestoreDoc("users", "18", {
+        await UserResolver.saveUser("18", {
           code: "18",
           name: "المدير العام",
           phone: "",
@@ -1317,7 +1335,7 @@ export class FirebaseBackupService {
         // OPTIONAL: Patch existing GM with protection keys if missing
         if (!cloudGM.isSystemMaster || !cloudGM.isProtected) {
           console.log("🛡️ Master Account Guard: Updating existing cloud account with protection flags...");
-          await setFirestoreDoc("users", "18", { 
+          await UserResolver.saveUser("18", { 
             ...cloudGM, 
             isSystemMaster: true, 
             isProtected: true, 

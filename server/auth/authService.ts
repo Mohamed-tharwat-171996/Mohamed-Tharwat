@@ -4,7 +4,7 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { dbService } from "../database/dbService";
 import { getFirestoreDB, FirebaseBackupService } from "../services/firebaseBackupService";
-import { getFirestoreApiDisabled, setFirestoreApiDisabled, isFirestoreErrorDisabled, getFirestoreDoc, setFirestoreDoc, resolveCollectionName, getEnvSecret, getAppEnv, isFirestoreConfigured, reinitializeFirestore } from "../services/firestoreService";
+import { getFirestoreApiDisabled, setFirestoreApiDisabled, isFirestoreErrorDisabled, getFirestoreDoc, setFirestoreDoc, resolveCollectionName, getEnvSecret, getAppEnv, isFirestoreConfigured, reinitializeFirestore, UserResolver } from "../services/firestoreService";
 
 let cachedSecrets: Record<string, string> = {};
 
@@ -144,36 +144,33 @@ export class AuthService {
     const codeClean = String(code).trim().toLowerCase();
 
     let dbUser = null;
+    let loginError: string | null = null;
 
-    // Query Firestore strictly - completely separated from SQLite, live directly to Firestore only
-    let retries = 3;
-    let lastErr = null;
-    while (retries > 0) {
-      try {
-        reinitializeFirestore(); // Force instant automated reconnection bypass
-        const resolvedColl = resolveCollectionName("users");
-        console.log(`🔐 Login attempt for [${codeClean}] in collection: ${resolvedColl}`);
-        dbUser = await getFirestoreDoc("users", codeClean);
-        if (!dbUser && codeClean === "18") {
-          console.log("🔒 Master account 18 missing in Firestore during login. Re-seeding securely...");
-          const { FirebaseBackupService } = await import("../services/firebaseBackupService");
-          await FirebaseBackupService.ensureDefaultGMInCloud();
-          dbUser = await getFirestoreDoc("users", "18");
-        }
-        break; // Success, exit retry loop
-      } catch (err: any) {
-        lastErr = err;
-        console.warn(`⚠️ Firestore lookup failed for ${codeClean}. Retrying... (${retries - 1} left)`);
-        retries--;
-        if (retries === 0) {
-          console.error(`🛑 Firestore lookup permanently failed for ${codeClean}:`, err.message || err);
-          break; // Exit loop to allow SQLite fallback below
-        }
-        await new Promise(resolve => setTimeout(resolve, 1500)); // wait 1.5s before retry
+    try {
+      dbUser = await UserResolver.getUserByCode(codeClean);
+      
+      if (!dbUser && codeClean === "18") {
+        console.log("🔒 Master account 18 missing in Firestore during login. Re-seeding securely...");
+        const { FirebaseBackupService } = await import("../services/firebaseBackupService");
+        await FirebaseBackupService.ensureDefaultGMInCloud();
+        dbUser = await UserResolver.getUserByCode("18");
+      }
+    } catch (err: any) {
+      const errMsg = err.message || String(err);
+      console.error(`🛑 UserResolver error for [${codeClean}]:`, errMsg);
+      
+      if (errMsg === "TIMEOUT") {
+        loginError = "فشل الاتصال: انتهت مهلة الطلب (Timeout). يرجى المحاولة مرة أخرى.";
+      } else if (errMsg === "UNAVAILABLE") {
+        loginError = "خدمة الفايرستور غير متاحة حالياً (Unavailable). سيتم محاولة استخدام النسخة المحلية.";
+      } else if (errMsg === "PERMISSION_DENIED") {
+        loginError = "خطأ في الصلاحيات: تم رفض الوصول لقاعدة البيانات (Permission Denied).";
+      } else {
+        loginError = `فشل الاتصال بقاعدة البيانات السحابية: ${errMsg}`;
       }
     }
 
-    // SQLite fallback if Firestore unavailable
+    // SQLite fallback if Firestore unavailable or user not found there
     if (!dbUser) {
       try {
         const localUser = dbService.queryOne("SELECT * FROM users WHERE LOWER(code) = ?", [codeClean]);
@@ -187,8 +184,11 @@ export class AuthService {
     }
 
     if (!dbUser) {
-      console.error(`🛑 REJECTED: User code [${codeClean}] is not registered in Firestore.`);
-      throw new Error("رمز أمين المخزن أو المستخدم غير مسجل في الفايرستور السحابي.");
+      if (loginError) {
+        throw new Error(loginError);
+      }
+      console.error(`🛑 REJECTED: User code [${codeClean}] is not registered.`);
+      throw new Error("رمز المستخدم غير مسجل أو غير موجود حالياً.");
     }
 
     const passwordHash = dbUser.password;

@@ -8,7 +8,7 @@ import { AuditService } from "../services/auditService";
 import { dbService } from "../database/dbService";
 import { FirebaseBackupService, getFirestoreDB, enableCloudBackup } from "../services/firebaseBackupService";
 import { QuotaService } from "../services/quotaService";
-import { COLLECTIONS, setFirestoreDoc, getFirestoreDoc, getFirestoreCollection, deleteFirestoreDoc, getFirestoreInstance, resolveCollectionName, getFirestoreApiDisabled, setFirestoreApiDisabled, reinitializeFirestore, getAppEnv, isFirestoreConfigured } from "../services/firestoreService";
+import { COLLECTIONS, setFirestoreDoc, getFirestoreDoc, getFirestoreCollection, deleteFirestoreDoc, getFirestoreInstance, resolveCollectionName, getFirestoreApiDisabled, setFirestoreApiDisabled, reinitializeFirestore, getAppEnv, isFirestoreConfigured, UserResolver, checkFirestoreHealth } from "../services/firestoreService";
 
 const router = express.Router();
 
@@ -49,16 +49,10 @@ router.post("/auth/verify-code", async (req, res) => {
   }
 
   try {
-    let row = null;
-    try {
-      row = await getFirestoreDoc("users", String(code).trim().toLowerCase());
-    } catch (err: any) {
-      console.error("⚠️ Firestore query failed for verify-code:", err.message || err);
-      throw new Error("فشل الاتصال بفايرستور للتحقق من الكود.");
-    }
+    const row = await UserResolver.getUserByCode(String(code).trim().toLowerCase());
 
     if (!row) {
-      return res.status(404).json({ error: "هذا الكود غير معرّف أو معتمد في الفايرستور السحابي يرجى مراجعة إدارة البرنامج." });
+      return res.status(404).json({ error: "هذا الكود غير معرّف أو معتمد في النظام يرجى مراجعة إدارة البرنامج." });
     }
 
     const isActivatedVal = row.is_activated !== undefined ? row.is_activated : row.isActivated;
@@ -102,16 +96,10 @@ router.post("/auth/activate", async (req, res) => {
   }
 
   try {
-    let row = null;
-    try {
-      row = await getFirestoreDoc("users", String(code).trim().toLowerCase());
-    } catch (err: any) {
-      console.error("⚠️ Firestore query failing for activation lookups:", err.message || err);
-      throw new Error("فشل الاتصال بفايرستور للتحقق من الكود قبل التفعيل.");
-    }
+    const row = await UserResolver.getUserByCode(String(code).trim().toLowerCase());
 
     if (!row) {
-      throw new Error("هذا الكود غير متاح للتفعيل في الفايرستور السحابي.");
+      throw new Error("هذا الكود غير متاح للتفعيل حالياً.");
     }
 
     const isActivatedVal = row.is_activated !== undefined ? row.is_activated : row.isActivated;
@@ -123,7 +111,7 @@ router.post("/auth/activate", async (req, res) => {
     const nowStamp = Date.now();
 
     // 🚀 Firestore-First write
-    await setFirestoreDoc("users", String(code).trim().toLowerCase(), {
+    await UserResolver.saveUser(String(code).trim().toLowerCase(), {
       ...row,
       code: String(code).trim(),
       name: name.trim(),
@@ -171,9 +159,7 @@ router.get("/data", AuthService.authenticateJWT, async (req: AuthenticatedReques
 // 5. GET All Users (Read-only, separated from app_state)
 router.get("/users", AuthService.authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const resolvedCollection = resolveCollectionName("users");
-    console.log(`☁️ Fetching live users strictly from Firestore collection '${resolvedCollection}'...`);
-    const usersList = await getFirestoreCollection("users") || [];
+    const usersList = await UserResolver.getAllUsers();
     
     const precodedUsers: any[] = [];
     const registeredUsers: any[] = [];
@@ -315,13 +301,10 @@ router.post("/data", AuthService.authenticateJWT, async (req: AuthenticatedReque
   }
 });
 
-// [ADD NEW ADMIN ENDPOINTS BELOW]
 // ADMIN: Get all users
 router.get("/admin/users", AuthService.authenticateJWT, AuthService.requireRole(["general_manager", "system_admin", "super_admin", "program_manager"]), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const resolvedCollection = resolveCollectionName("users");
-    console.log(`☁️ Admin: Fetching live users strictly from Firestore collection '${resolvedCollection}'...`);
-    const usersList = await getFirestoreCollection("users") || [];
+    const usersList = await UserResolver.getAllUsers();
 
     const mappedUsers = usersList.map(u => {
       const isPrecodedVal = u.is_precoded !== undefined ? u.is_precoded : u.isPrecoded;
@@ -346,6 +329,34 @@ router.get("/admin/users", AuthService.authenticateJWT, AuthService.requireRole(
   }
 });
 
+router.post("/admin/clear-active-session", AuthService.authenticateJWT, AuthService.requireRole(["system_admin", "super_admin", "general_manager", "program_manager"]), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const actor = req.user?.code || "ADMIN";
+    
+    // 1. Clear locally
+    SessionService.clearActiveSession();
+    
+    // 2. Clear in Cloud (sync current state with null activeSession)
+    const state = SessionService.getStateWithPasswords();
+    state.activeSession = null;
+    await FirebaseBackupService.backupStateToCloud(state, true, true);
+    
+    dbService.logAction(actor, "حذف الجلسة النشطة", "تم حذف الجلسة النشطة من جميع الأماكن (SQLite و Firestore) بنجاح.", getClientIp(req));
+    
+    // Broadcast update
+    const broadcast = (req.app as any).getWssBroadcast ? (req.app as any).getWssBroadcast() : null;
+    if (broadcast) {
+      const fullState = SessionService.getState();
+      broadcast(fullState);
+    }
+    
+    res.json({ status: "ok", message: "تم حذف الجلسة النشطة بنجاح." });
+  } catch (err: any) {
+    console.error("Failed to clear active session:", err);
+    res.status(500).json({ error: err.message || "فشل حذف الجلسة النشطة." });
+  }
+});
+
 // ADMIN: Add/Upsert user safely
 router.post("/admin/users", AuthService.authenticateJWT, AuthService.requireRole(["general_manager", "system_admin", "super_admin", "program_manager"]), async (req: AuthenticatedRequest, res: Response) => {
   const { code, name, phone, role, password, isPrecoded, isRegistered, isActivated } = req.body;
@@ -354,13 +365,7 @@ router.post("/admin/users", AuthService.authenticateJWT, AuthService.requireRole
 
   try {
     const codeStr = String(code).trim();
-    let existing = null;
-    try {
-      existing = await getFirestoreDoc("users", codeStr.toLowerCase());
-    } catch (err: any) {
-      console.error("⚠️ Firestore existing user lookup failed in POST /admin/users:", err.message || err);
-      throw new Error("فشل التحقق من وجود المستخدم في الفايرستور السحابي.");
-    }
+    const existing = await UserResolver.getUserByCode(codeStr.toLowerCase());
     
     // RBAC Protection: Only general_manager can touch other general_managers
     if (existing && existing.role === 'general_manager' && actorRole !== 'general_manager') {
@@ -405,7 +410,7 @@ router.post("/admin/users", AuthService.authenticateJWT, AuthService.requireRole
       updated_at: nowStamp
     };
 
-    await setFirestoreDoc("users", codeStr.toLowerCase(), updatedUserObj);
+    await UserResolver.saveUser(codeStr.toLowerCase(), updatedUserObj);
 
     if (existing) {
       dbService.logAction(actorCode, "تعديل مستخدم", `تم تعديل بيانات المستخدم في الفايرستور: ${codeStr} (${name})`, getClientIp(req));
@@ -429,15 +434,9 @@ router.delete("/admin/users/:code", AuthService.authenticateJWT, AuthService.req
   const actorCode = req.user?.code || "sys";
 
   try {
-    let target = null;
-    try {
-      target = await getFirestoreDoc("users", String(code).trim().toLowerCase());
-    } catch (err: any) {
-      console.error("⚠️ Target user lookup failed in DELETE /admin/users/:code:", err.message || err);
-      throw new Error("فشل التحقق من وجود المستخدم في الفايرستور السحابي.");
-    }
+    const target = await UserResolver.getUserByCode(String(code).trim().toLowerCase());
     
-    if (!target) return res.status(404).json({ error: "المستخدم غير موجود في الفايرستور السحابي." });
+    if (!target) return res.status(404).json({ error: "المستخدم غير موجود في النظام." });
 
     // Protection: Cannot delete the last general_manager
     if (target.role === 'general_manager') {
@@ -474,21 +473,18 @@ router.delete("/admin/users/:code", AuthService.authenticateJWT, AuthService.req
 });
 
 // 6. Manual DB Backup triggers (System Admins & Managers only)
-router.get("/system/status", (req, res) => {
-  const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
-  const backupConfigPath = path.join(process.cwd(), 'server', 'firebase-backup-config.json');
-  const hasConfig = fs.existsSync(configPath) || fs.existsSync(backupConfigPath);
-  
-  // ALWAYS report cloudSyncAvailable as true because our robust server-local backup mirror
-  // guarantees 100% offline-first reliability and keeps backup/restore operations fully operational.
-  const isCloudEnabled = true;
+router.get("/system/status", async (req, res) => {
+  const health = await checkFirestoreHealth();
   
   res.json({ 
     status: "ok", 
-    cloudSyncAvailable: isCloudEnabled, 
-    hasConfig: true,
-    isCloudDisabled: false,
-    appEnv: getAppEnv()
+    cloudSyncAvailable: health.connected,
+    firestoreHealthy: health.healthy,
+    cloudDisabledReason: health.reason || null,
+    appEnv: getAppEnv(),
+    resolvedCollection: resolveCollectionName("app_state"),
+    lastSuccessfulSync: dbService.queryOne("SELECT value FROM settings WHERE key = 'last_successful_backup_time'")?.value || null,
+    lastFailedSync: dbService.queryOne("SELECT value FROM settings WHERE key = 'last_failed_backup_time'")?.value || null
   });
 });
 
@@ -778,6 +774,10 @@ router.post("/deleted/permanently-delete", AuthService.authenticateJWT, AuthServ
 
     dbService.transaction(() => {
       dbService.run("DELETE FROM deleted_sessions WHERE id = ?", [id]);
+      dbService.run("INSERT OR REPLACE INTO permanent_tombstones (session_id, tombstoned_at) VALUES (?, ?)", [
+        row.session_id,
+        new Date().toISOString()
+      ]);
       
       const logDetails = `تم الحذف النهائي للجلسة رقم (${row.session_id}) من سلة المحذوفات.`;
       dbService.logAction(actor, "حذف نهائي", logDetails, getClientIp(req));
@@ -799,6 +799,11 @@ router.post("/deleted/permanently-delete", AuthService.authenticateJWT, AuthServ
         await deleteFirestoreDoc("deleted_sessions", String(id));
         if (row && row.session_id) {
           await deleteFirestoreDoc("inventory_snapshots", String(row.session_id));
+          // 🛡️ Tombstone in Firestore
+          await setFirestoreDoc("permanent_tombstones", String(row.session_id), {
+            session_id: row.session_id,
+            tombstoned_at: new Date().toISOString()
+          });
         }
         
         const fullState = SessionService.getStateWithPasswords();
@@ -885,7 +890,7 @@ router.post("/auth/update-profile", AuthService.authenticateJWT, async (req: Aut
     const isRegisteredVal = userRow.is_registered !== undefined ? userRow.is_registered : userRow.isRegistered;
     const isActivatedVal = userRow.is_activated !== undefined ? userRow.is_activated : userRow.isActivated;
 
-    const cloudUserObj = {
+    const updatedUserObj = {
       code: userRow.code,
       name: finalName,
       phone: finalPhone,
@@ -898,7 +903,7 @@ router.post("/auth/update-profile", AuthService.authenticateJWT, async (req: Aut
       updated_at: nowStamp
     };
 
-    await setFirestoreDoc("users", String(userCode).toLowerCase(), cloudUserObj);
+    await UserResolver.saveUser(String(userCode).toLowerCase(), updatedUserObj);
     dbService.bumpLastUpdated();
     
     let auditAction = "تعديل الملف الشخصي";
@@ -918,11 +923,11 @@ router.post("/auth/update-profile", AuthService.authenticateJWT, async (req: Aut
     res.json({
       status: "ok",
       user: {
-        code: cloudUserObj.code,
-        name: cloudUserObj.name,
-        phone: cloudUserObj.phone || "",
-        role: cloudUserObj.role,
-        rememberMe: cloudUserObj.remember_me === 1,
+        code: updatedUserObj.code,
+        name: updatedUserObj.name,
+        phone: updatedUserObj.phone || "",
+        role: updatedUserObj.role,
+        rememberMe: updatedUserObj.remember_me === 1,
         isUsingDefaultPassword: false,
       }
     });
@@ -940,11 +945,7 @@ router.get("/health", (req, res) => {
 // 13. System Environment Diagnostic Endpoint (For Troubleshooting)
 router.get("/diagnose", async (req, res) => {
   try {
-    // Proactively re-enable if it was disabled (e.g. after a prior failure that is now potentially resolved)
-    console.log("🔍 Diagnostic check: Force-resetting cloud sync flags...");
-    enableCloudBackup();
-    reinitializeFirestore();
-
+    const health = await checkFirestoreHealth();
     const resolvedUsersCollection = resolveCollectionName("users");
     const docName = FirebaseBackupService.getBackupDocumentName();
     
@@ -952,54 +953,30 @@ router.get("/diagnose", async (req, res) => {
     let localUsersCount = 0;
     let localItemsCount = 0;
     try {
-      const row = dbService.queryOne("SELECT count(*) as count FROM users");
-      localUsersCount = row ? row.count : 0;
-      const rowItems = dbService.queryOne("SELECT count(*) as count FROM inventory");
-      localItemsCount = rowItems ? rowItems.count : 0;
+      localUsersCount = dbService.queryOne("SELECT count(*) as count FROM users")?.count || 0;
+      localItemsCount = dbService.queryOne("SELECT count(*) as count FROM inventory")?.count || 0;
     } catch (dbE) {}
 
-    // Check Cloud counts if available
+    // Check Cloud counts if healthy
     let cloudUsersCountStatus = "Unknown";
     let foundInCollection = "None";
-    try {
-      const firestoreDB = getFirestoreDB();
-      if (firestoreDB) {
-        const { collection, getDocs } = await import("firebase/firestore");
-        const env = getAppEnv();
-        const userCollectionsToTry = [`users_${env}`, "users", "app_users", `app_users_${env}`];
-        
-        let found = false;
-        for (const collName of userCollectionsToTry) {
-          try {
-            const snap = await getDocs(collection(firestoreDB, collName));
-            if (snap && !snap.empty) {
-              cloudUsersCountStatus = `${snap.size} users`;
-              foundInCollection = collName;
-              found = true;
-              break;
-            } else if (snap && snap.empty) {
-               if (foundInCollection === "None") {
-                 cloudUsersCountStatus = "0 users (Empty)";
-                 foundInCollection = collName;
-               }
-            }
-          } catch (e) {}
-        }
-        
-        if (!found && foundInCollection === "None") {
-          cloudUsersCountStatus = "Empty (Checked all variants)";
-        }
-      } else {
-        cloudUsersCountStatus = "No Firestore DB Instance";
+    
+    if (health.healthy) {
+      try {
+        const users = await UserResolver.getAllUsers();
+        cloudUsersCountStatus = `${users.length} users`;
+        foundInCollection = resolvedUsersCollection;
+      } catch (e: any) {
+        cloudUsersCountStatus = `Error: ${e.message || e}`;
       }
-    } catch (e: any) {
-      cloudUsersCountStatus = `Error: ${e.message || e}`;
+    } else {
+      cloudUsersCountStatus = `Cloud Unhealthy: ${health.reason}`;
     }
 
     res.json({
       status: "ok",
-      cloudSyncAvailable: !getFirestoreApiDisabled(),
-      hasConfig: fs.existsSync(path.join(process.cwd(), 'firebase-applet-config.json')),
+      cloudSyncAvailable: health.connected,
+      firestoreHealthy: health.healthy,
       diagnostics: {
         APP_ENV: getAppEnv(),
         resolvedUsersCollection,

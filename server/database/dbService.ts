@@ -142,6 +142,11 @@ export class DatabaseService {
         session_data TEXT NOT NULL,
         deleted_reason TEXT
       );
+
+      CREATE TABLE IF NOT EXISTS permanent_tombstones (
+        session_id TEXT PRIMARY KEY,
+        tombstoned_at TEXT NOT NULL
+      );
     `);
 
     try {
