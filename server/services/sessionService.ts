@@ -148,7 +148,7 @@ export class SessionService {
 
     // Try to fetch real session data from Firestore before creating a stub
     let realSessionData: any = null;
-    if (incoming.pastSessions !== undefined && incoming.deletedPastSessionId !== undefined) {
+    if (incoming.deletedPastSessionId !== undefined) {
       const deleteIdStr = String(incoming.deletedPastSessionId);
       const snap = dbService.queryOne("SELECT * FROM inventory_snapshots WHERE session_id = ?", [deleteIdStr]);
       if (!snap) {
@@ -508,75 +508,93 @@ export class SessionService {
         `, [String(incoming.isFirebaseSyncDisabled)]);
       }
 
-      // 3. Process incoming past session snapshots OR new archiving safely without accidental deletes
-      if (incoming.pastSessions !== undefined) {
+      // 3. Process explicit past session deletion requests safely
+      if (incoming.deletedPastSessionId !== undefined) {
         try {
-          // If there is an explicit request to delete a snapshot via its button
-          if (incoming.deletedPastSessionId !== undefined) {
-            const deleteIdStr = String(incoming.deletedPastSessionId);
-            const snap = dbService.queryOne("SELECT * FROM inventory_snapshots WHERE session_id = ?", [deleteIdStr]);
-            if (snap) {
-              const snapshotObj = JSON.parse(snap.snapshot_data);
-              const stubData = JSON.stringify({ ...snapshotObj, type: "archived", deletedReason: incoming.deletedReason || incoming.metadata?.deletedReason });
-              dbService.run(`
-                INSERT INTO deleted_sessions (session_id, deleted_at, session_data, deleted_reason)
-                VALUES (?, ?, ?, ?)
-              `, [
-                deleteIdStr,
-                new Date().toISOString(),
-                stubData,
-                incoming.deletedReason || incoming.metadata?.deletedReason || null
-              ]);
-              pendingCloudDeletes.push({
-                sessionId: deleteIdStr,
-                stubData: stubData,
-                deletedReason: incoming.deletedReason || incoming.metadata?.deletedReason || null
-              });
-              dbService.run("DELETE FROM inventory_snapshots WHERE session_id = ?", [deleteIdStr]);
-              snapshotDeleted = true;
-              dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedPastSessions', ?)", [Date.now().toString()]);
-            } else {
-              // Stub insert for deleted_sessions when deleting something that wasn't in local SQLite cache
-              // This is crucial to prevent the session from ever returning on subsequent Firestore background downloads
-              const stubData = realSessionData ?
-                JSON.stringify({ ...realSessionData, type: "archived", deletedReason: incoming.deletedReason }) :
-                JSON.stringify({ id: deleteIdStr, type: "archived", items: [], notes: "Deleted from cloud sync" });
+          const deleteIdStr = String(incoming.deletedPastSessionId);
+          const snap = dbService.queryOne("SELECT * FROM inventory_snapshots WHERE session_id = ?", [deleteIdStr]);
+          if (snap) {
+            const snapshotObj = JSON.parse(snap.snapshot_data);
+            const stubData = JSON.stringify({ ...snapshotObj, type: "archived", deletedReason: incoming.deletedReason || incoming.metadata?.deletedReason });
+            dbService.run(`
+              INSERT INTO deleted_sessions (session_id, deleted_at, session_data, deleted_reason)
+              VALUES (?, ?, ?, ?)
+            `, [
+              deleteIdStr,
+              new Date().toISOString(),
+              stubData,
+              incoming.deletedReason || incoming.metadata?.deletedReason || null
+            ]);
+            try {
+              (async () => {
+                const { setFirestoreDoc } = await import("./firestoreService");
+                await setFirestoreDoc("deleted_sessions", deleteIdStr, {
+                  session_id: deleteIdStr, deleted_at: new Date().toISOString(),
+                  session_data: stubData, deleted_reason: incoming.deletedReason || null
+                });
+              })();
+            } catch (e) { console.warn("Could not save deleted session to Firestore:", e); }
+            pendingCloudDeletes.push({
+              sessionId: deleteIdStr,
+              stubData: stubData,
+              deletedReason: incoming.deletedReason || incoming.metadata?.deletedReason || null
+            });
+            dbService.run("DELETE FROM inventory_snapshots WHERE session_id = ?", [deleteIdStr]);
+            snapshotDeleted = true;
+            dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedPastSessions', ?)", [Date.now().toString()]);
+          } else {
+            // Stub insert for deleted_sessions when deleting something that wasn't in local SQLite cache
+            // This is crucial to prevent the session from ever returning on subsequent Firestore background downloads
+            const stubData = realSessionData ?
+              JSON.stringify({ ...realSessionData, type: "archived", deletedReason: incoming.deletedReason }) :
+              JSON.stringify({ id: deleteIdStr, type: "archived", items: [], notes: "Deleted from cloud sync" });
 
-              dbService.run(`
-                INSERT INTO deleted_sessions (session_id, deleted_at, session_data, deleted_reason)
-                VALUES (?, ?, ?, ?)
-              `, [
-                deleteIdStr,
-                new Date().toISOString(),
-                stubData,
-                incoming.deletedReason || incoming.metadata?.deletedReason || null
-              ]);
-              pendingCloudDeletes.push({
-                sessionId: deleteIdStr,
-                stubData: stubData,
-                deletedReason: incoming.deletedReason || incoming.metadata?.deletedReason || null
-              });
-              dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedDeletedSessions', ?)", [Date.now().toString()]);
-            }
+            dbService.run(`
+              INSERT INTO deleted_sessions (session_id, deleted_at, session_data, deleted_reason)
+              VALUES (?, ?, ?, ?)
+            `, [
+              deleteIdStr,
+              new Date().toISOString(),
+              stubData,
+              incoming.deletedReason || incoming.metadata?.deletedReason || null
+            ]);
+            try {
+              (async () => {
+                const { setFirestoreDoc } = await import("./firestoreService");
+                await setFirestoreDoc("deleted_sessions", deleteIdStr, {
+                  session_id: deleteIdStr, deleted_at: new Date().toISOString(),
+                  session_data: stubData, deleted_reason: incoming.deletedReason || null
+                });
+              })();
+            } catch (e) { console.warn("Could not save deleted session to Firestore:", e); }
+            pendingCloudDeletes.push({
+              sessionId: deleteIdStr,
+              stubData: stubData,
+              deletedReason: incoming.deletedReason || incoming.metadata?.deletedReason || null
+            });
+            dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedDeletedSessions', ?)", [Date.now().toString()]);
+          }
 
-            // Explicitly prune from cloud to ensure it doesn't return on next sync
-            if (!getFirestoreApiDisabled()) {
-              deleteFirestoreDoc("inventory_snapshots", deleteIdStr).catch(e => 
-                console.warn(`⚠️ Cloud delete failed for moved snapshot ${deleteIdStr}:`, e.message)
-              );
-            }
-
-            AuditService.log(
-              actorCode || "SYSTEM",
-              "تعديل الجرد",
-              `تم نقل جلسة الجرد المؤرشفة رقم (${deleteIdStr}) إلى سلة المحذوفات موقتاً.`,
-              clientIp
+          // Explicitly prune from cloud to ensure it doesn't return on next sync
+          if (!getFirestoreApiDisabled()) {
+            deleteFirestoreDoc("inventory_snapshots", deleteIdStr).catch(e => 
+              console.warn(`⚠️ Cloud delete failed for moved snapshot ${deleteIdStr}:`, e.message)
             );
           }
+
+          AuditService.log(
+            actorCode || "SYSTEM",
+            "تعديل الجرد",
+            `تم نقل جلسة الجرد المؤرشفة رقم (${deleteIdStr}) إلى سلة المحذوفات موقتاً.`,
+            clientIp
+          );
         } catch (err) {
           console.error("Error archiving deleted archived sessions:", err);
         }
+      }
 
+      // 4. Process incoming past session snapshots safely without accidental deletes
+      if (incoming.pastSessions !== undefined) {
         try {
           // Find if there is any past session in incoming array
           const dbSnapIds = new Set(

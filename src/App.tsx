@@ -403,6 +403,25 @@ export default function App() {
   const [isEditingInspectSession, setIsEditingInspectSession] = useState(false);
   const [showInspectModifications, setShowInspectModifications] = useState(false);
 
+  // Variance tracking states
+  const [selectedVarianceItem, setSelectedVarianceItem] = useState<{
+    itemId: string;
+    itemName: string;
+    varianceReason: string;
+    varianceNotes: string;
+    isFromPastSession: boolean;
+    pastSessionId?: string;
+  } | null>(null);
+  const [showVarianceNotesModal, setShowVarianceNotesModal] = useState(false);
+  const [varianceNotesTempText, setVarianceNotesTempText] = useState("");
+  const [isEditingVariancesOnly, setIsEditingVariancesOnly] = useState(false);
+
+  useEffect(() => {
+    if (selectedVarianceItem) {
+      setVarianceNotesTempText(selectedVarianceItem.varianceNotes || "");
+    }
+  }, [selectedVarianceItem]);
+
   // Modals
   const [showDeletionReasonModal, setShowDeletionReasonModal] = useState(false);
   const [deletionTarget, setDeletionTarget] = useState<{ type: 'active' | 'archived', id?: string } | null>(null);
@@ -419,7 +438,7 @@ export default function App() {
   const [hasFirebaseConfig, setHasFirebaseConfig] = useState<boolean>(true);
   const [activeProgramManagerTab, setActiveProgramManagerTab] = useState<'upload' | 'archive' | 'none'>('none');
   const [activeSupervisorTab, setActiveSupervisorTab] = useState<'sheet' | 'archive' | 'none' | 'manager_dashboard'>('none');
-  const [storesManagerSubTab, setStoresManagerSubTab] = useState<'items' | 'auditors' | 'general'>('items');
+  const [storesManagerSubTab, setStoresManagerSubTab] = useState<'items' | 'auditors' | 'general' | 'smart_analytics'>('items');
   const [activeStorekeeperTab, setActiveStorekeeperTab] = useState<'sheet' | 'archive' | 'none'>('none');
   const [activeBackupSubTab, setActiveBackupSubTab] = useState<'cloud' | 'offline' | 'none'>('none');
   const [activeBackupInnerSection, setActiveBackupInnerSection] = useState<string>('none');
@@ -3327,8 +3346,22 @@ export default function App() {
   const handleSaveArchivedSession = async () => {
     if (!inspectSession) return;
 
-    if (!user || !["general_manager", "system_admin", "program_manager"].includes(user.role)) {
-      showToast("عذراً، التعديل مخصص فقط لمسؤول البرنامج!", "error");
+    if (!user) return;
+
+    const isVarianceEdit = isEditingVariancesOnly;
+    const allowedRolesForQuantities = ["general_manager", "system_admin", "program_manager"];
+    const allowedRolesForVariances = ["supervisor", "warehouse_supervisor", "stores_manager", "general_manager", "system_admin", "program_manager"];
+    
+    const canSave = isVarianceEdit 
+      ? allowedRolesForVariances.includes(user.role)
+      : allowedRolesForQuantities.includes(user.role);
+
+    if (!canSave) {
+      showToast(isVarianceEdit 
+        ? "عذراً، تعديل الفروقات مخصص للمشرفين والمسؤولين فقط!" 
+        : "عذراً، التعديل مخصص فقط لمسؤول البرنامج!", 
+        "error"
+      );
       return;
     }
 
@@ -3374,6 +3407,7 @@ export default function App() {
       // We don't touch activeSession or masterItems.
       setPastSessions(updatedPast);
       setIsEditingInspectSession(false);
+      setIsEditingVariancesOnly(false);
       setInspectSession(null); // safely close it
 
       await pushStateToServer({
@@ -3417,6 +3451,8 @@ export default function App() {
           "جرد المسئول": item.managerQty !== null && item.managerQty !== undefined ? item.managerQty : "-",
           "الكمية الفعلية (المعتمدة)": pQty !== null ? pQty : "لم يجرد",
           "الفرق النهائي": finalDiff !== null ? finalDiff : "—",
+          "توضيح الفرق (نوع الخطأ)": item.varianceReason || "أخرى",
+          "ملاحظات توضيحية للخطأ": item.varianceNotes || "لا توجد ملاحظات",
           "الفرق السابق": item.previousDiff !== undefined ? item.previousDiff : "—",
           "حالة الجرد": finalDiff === null ? "غير مجرد" : (finalDiff === 0 ? "مطابق" : (finalDiff > 0 ? `زيادة (+${finalDiff})` : `عجز (${finalDiff})`)),
           "تعديلات وإعادات الجرد الفردية": modsText || "لا توجد تعديلات",
@@ -3440,6 +3476,8 @@ export default function App() {
         { wch: 15 }, // جرد المسئول
         { wch: 25 }, // الكمية الفعلية (المعتمدة)
         { wch: 15 }, // الفرق النهائي
+        { wch: 25 }, // توضيح الفرق (نوع الخطأ)
+        { wch: 40 }, // ملاحظات توضيحية للخطأ
         { wch: 15 }, // الفرق السابق
         { wch: 15 }, // حالة الجرد
         { wch: 60 }, // تعديلات وإعادات الجرد الفردية
@@ -3457,6 +3495,58 @@ export default function App() {
     } catch (error) {
       console.error("Excel Session Export Error:", error);
       showToast("❌ حدث خطأ أثناء تصدير ملف Excel التفصيلي", "error");
+    }
+  };
+
+  // Helper to export items with non-default variance classifications for supervisor/manager reviews
+  const handleExportVariances = (session: AuditSession) => {
+    try {
+      const itemsWithVariance = (session.items || []).filter(item => item.varianceReason && item.varianceReason !== 'أخرى');
+      if (itemsWithVariance.length === 0) {
+        showToast("⚠️ لا توجد فروقات مصنفة (مخالفة لـ أخرى) في هذه الجلسة لتصديرها!", "info");
+        return;
+      }
+
+      const rows = itemsWithVariance.map(item => {
+        const pQty = session.isCompleted ? getRoleBasedPhysicalQty(item, user?.role) : item.physicalQty;
+        const finalDiff = pQty !== null ? pQty - item.bookQty : 0;
+        return {
+          "كود الصنف": item.itemId,
+          "اسم الصنف": item.itemName,
+          "القسم التجاري": item.category || "عام",
+          "الرصيد الدفتري": item.bookQty,
+          "الرصيد الفعلي (المعتمد)": pQty !== null ? pQty : "لم يجرد",
+          "الفارق النهائي": finalDiff,
+          "توضيح الفرق (نوع الخطأ)": item.varianceReason,
+          "ملاحظات توضيحية للخطأ": item.varianceNotes || "لا توجد ملاحظات"
+        };
+      });
+
+      const ws = XLSX.utils.json_to_sheet(rows);
+
+      const wscols = [
+        { wch: 15 }, // كود الصنف
+        { wch: 30 }, // اسم الصنف
+        { wch: 15 }, // القسم التجاري
+        { wch: 15 }, // الرصيد الدفتري
+        { wch: 25 }, // الرصيد الفعلي
+        { wch: 15 }, // الفارق النهائي
+        { wch: 25 }, // توضيح الفرق
+        { wch: 50 }  // ملاحظات توضيحية للخطأ
+      ];
+      ws['!cols'] = wscols;
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "فروقات الجلسة");
+
+      const dateStr = new Date(session.archivedAt || session.date).toISOString().split("T")[0];
+      const filename = `توضيح_فروقات_جرد_${dateStr}.xlsx`;
+      XLSX.writeFile(wb, filename);
+
+      showToast(`📥 تم تصدير ${itemsWithVariance.length} من الفروقات المصنفة بنجاح!`, "success");
+    } catch (error) {
+      console.error("Excel Variance Export Error:", error);
+      showToast("❌ حدث خطأ أثناء تصدير فروقات الجلسة", "error");
     }
   };
 
@@ -4549,7 +4639,7 @@ export default function App() {
                                 <p className="text-[9px] text-slate-500 font-extrabold mt-1 leading-normal">
                                   {isFirebaseSyncDisabled 
                                     ? "تم إيقاف المزامنة لحفظ الكوتة اليومية وتخزين البيانات محلياً بـ SQLite بأمان كامل." 
-                                    : "يتم نسخ التعديلات بانتظام لقاعدة البيانات السحابية لتأمين الجلسات النشطة."}
+                                    : "يتم نسخ التعديلات بانتظام لقاعدة البيانات السحابية."}
                                 </p>
                               </div>
                               
@@ -4603,13 +4693,13 @@ export default function App() {
                             <div className="flex items-center justify-between border-b border-slate-200 pb-2.5">
                               <span className="text-xs font-black text-slate-700 flex items-center gap-1.5 justify-start">
                                 <Database className="w-4 h-4 text-indigo-500" />
-                                حالة النسخة السحابية الحالية بـ Firestore
+                                حالة نسخة السحابة Firestore
                               </span>
                               {isCloudSyncAvailable ? (
                                 <div className="flex items-center gap-1.5">
                                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-750 border border-indigo-100">
                                     <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></span>
-                                    مستقر سحابياً
+                                    مستقر
                                   </span>
                                   <button 
                                     onClick={async () => {
@@ -4684,95 +4774,81 @@ export default function App() {
                                 <div className="bg-indigo-50/50 border border-indigo-100/50 p-2.5 rounded-lg mb-3 flex flex-col gap-1 text-[11px] font-bold text-indigo-700">
                                   <div className="flex items-center justify-between w-full">
                                     <span className="text-[10px] bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded-md opacity-90">المزامنة نشطة ✅</span>
-                                    <span dir="rtl">البيئة السحابية: {appEnv === 'production' ? 'الإنتاج (Production)' : 'التطوير (Development)'}</span>
+                                    <span dir="rtl">بيئة : {appEnv === 'production' ? 'الإنتاج (Production)' : 'التطوير (Development)'}</span>
                                   </div>
                                 </div>
                                 
                                 {cloudBackupMetadata ? (
                                   <div className="space-y-4">
-                                    <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
-                                      <div className="bg-white p-2.5 rounded-xl border border-slate-150 space-y-1">
-                                        <span className="text-[9px] font-bold text-slate-400 block pb-0.5 text-right">المستخدمين بالسحابة</span>
-                                        <span className="text-[10.5px] font-black text-purple-700 block text-right">
-                                          {cloudBackupMetadata.userCount !== undefined ? `${cloudBackupMetadata.userCount} مستخدم` : 'غير متوفر'}
-                                        </span>
-                                      </div>
-                                      <div className="bg-white p-2.5 rounded-xl border border-slate-150 space-y-1">
-                                        <span className="text-[9px] font-bold text-slate-400 block pb-0.5 text-left">آخر رفع سحابي</span>
-                                        <span className="text-[10.5px] font-black text-slate-800 block leading-tight text-left">
-                                          {cloudBackupMetadata.updatedAtString
-                                            ? new Date(cloudBackupMetadata.updatedAtString).toLocaleString('ar-EG', { dateStyle: 'short', timeStyle: 'short' })
-                                            : 'غير متوفر'}
-                                        </span>
-                                      </div>
-                                      
-                                      <div className="bg-white p-2.5 rounded-xl border border-slate-150 space-y-1">
-                                        <span className="text-[9px] font-bold text-slate-400 block pb-0.5 text-right">الجلسات المؤرشفة</span>
-                                        <span className="text-[10.5px] font-black text-blue-700 block text-right">
-                                          {cloudBackupMetadata.sessionCount} جلسة جرد
-                                        </span>
-                                      </div>
-                                      <div className="bg-white p-2.5 rounded-xl border border-slate-150 space-y-1">
-                                        <span className="text-[9px] font-bold text-slate-400 block pb-0.5 text-left">الجلسات المحذوفة</span>
-                                        <span className="text-[10.5px] font-black text-rose-600 block text-left">
-                                          {cloudBackupMetadata.deletedSessionCount !== undefined ? `${cloudBackupMetadata.deletedSessionCount} جلسة` : '0 جلسة'}
-                                        </span>
-                                      </div>
-
-                                      <div className="bg-white p-2.5 rounded-xl border border-slate-150 space-y-1 col-span-2 lg:col-span-1 flex flex-col justify-between">
-                                        <div>
-                                          <span className="text-[9px] font-bold text-slate-400 block pb-0.5 text-right">حالة الدورة الحالية</span>
-                                          <span className={`text-[10.5px] font-black block text-right ${cloudBackupMetadata.hasActiveSession ? "text-amber-600" : "text-slate-400"}`}>
-                                            {cloudBackupMetadata.hasActiveSession ? "يوجد جلسة نشطة" : "لا توجد جلسات حية"}
+                                    <div className="space-y-4">
+                                      {/* Top Row: Users & Last Backup */}
+                                      <div className="grid grid-cols-2 gap-3">
+                                        <div className="bg-white p-2.5 rounded-xl border border-slate-150 space-y-1">
+                                          <span className="text-[9px] font-bold text-slate-400 block pb-0.5 text-right">المستخدمين بالسحابة</span>
+                                          <span className="text-[10.5px] font-black text-purple-700 block text-right">
+                                            {cloudBackupMetadata.userCount !== undefined ? `${cloudBackupMetadata.userCount} مستخدم` : 'غير متوفر'}
                                           </span>
                                         </div>
-                                        {cloudBackupMetadata.hasActiveSession && user?.role && ["program_manager", "general_manager", "system_admin", "super_admin"].includes(user.role) && (
-                                          <button
-                                            type="button"
-                                            onClick={handleForceClearActiveSession}
-                                            className="w-full mt-1.5 font-bold text-[8.5px] py-1 px-1.5 border border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100 rounded-lg cursor-pointer transition-all active:scale-95 text-center focus:outline-none"
-                                          >
-                                            حذف وتصفير الجلسة النشطة نهائياً 🗑️
-                                          </button>
-                                        )}
-                                      </div>
-                                    </div>
-
-                                    <div className="h-0.5 bg-slate-100 rounded-full w-2/3 mx-auto opacity-50"></div>
-
-                                    {/* Inventory Mirror Compact Shortcut Card */}
-                                    <div className="bg-emerald-50/40 p-4 rounded-2xl border border-emerald-100/50 space-y-3 relative overflow-hidden group">
-                                      <div className="absolute top-0 left-0 w-24 h-24 bg-emerald-200/10 blur-2xl -translate-x-12 -translate-y-12"></div>
-                                      
-                                      <div className="flex items-center justify-between relative z-10 border-b border-emerald-100/30 pb-2">
-                                        <div className="flex items-center gap-2 text-emerald-800">
-                                          <div className="p-1.5 bg-emerald-100 rounded-lg">
-                                            <Database className="w-3.5 h-3.5" />
-                                          </div>
-                                          <h4 className="font-black text-[11px] tracking-tight">قاعدة بيانات المرآة (Mirror Inventory)</h4>
-                                        </div>
-                                        <button 
-                                          onClick={() => setIsShowingMirror(true)} 
-                                          className="text-[9px] bg-white border border-emerald-200 text-emerald-700 font-bold px-2.5 py-1 rounded-lg hover:bg-emerald-100 transition-all cursor-pointer shadow-sm active:scale-95"
-                                        >
-                                          استعراض الأصناف 🔍
-                                        </button>
-                                      </div>
-                                      
-                                      <div className="flex items-center gap-4 relative z-10">
-                                        <div className="flex-1 bg-white/60 p-2.5 rounded-xl border border-white/80 space-y-0.5">
-                                          <span className="text-[8.5px] font-bold text-emerald-600/70 block text-right">العدد المسجل</span>
-                                          <span className="text-[12px] font-black text-emerald-900 block text-right">{cloudBackupMetadata.masterItemCount} صنف</span>
-                                        </div>
-                                        <div className="flex-1 bg-white/60 p-2.5 rounded-xl border border-white/80 space-y-0.5">
-                                          <span className="text-[8.5px] font-bold text-emerald-600/70 block text-right">تاريخ المزامنة</span>
-                                          <span className="text-[12px] font-black text-emerald-900 block text-right">
-                                            {cloudBackupMetadata.updatedAtString 
-                                              ? new Date(cloudBackupMetadata.updatedAtString).toLocaleDateString('ar-EG') 
+                                        <div className="bg-white p-2.5 rounded-xl border border-slate-150 space-y-1">
+                                          <span className="text-[9px] font-bold text-slate-400 block pb-0.5 text-left">آخر رفع سحابي</span>
+                                          <span className="text-[10.5px] font-black text-slate-800 block leading-tight text-left">
+                                            {cloudBackupMetadata.updatedAtString
+                                              ? new Date(cloudBackupMetadata.updatedAtString).toLocaleString('ar-EG', { dateStyle: 'short', timeStyle: 'short' })
                                               : 'غير متوفر'}
                                           </span>
                                         </div>
                                       </div>
+
+                                      {/* Middle Row: Sessions */}
+                                      <div className="grid grid-cols-3 gap-3">
+                                        <div className="bg-white p-2.5 rounded-xl border border-slate-150 space-y-1 flex flex-col justify-between">
+                                          <div>
+                                            <span className="text-[9px] font-bold text-slate-400 block pb-0.5 text-right">حالة الجلسة</span>
+                                            <span className={`text-[10.5px] font-black block text-right ${cloudBackupMetadata.hasActiveSession ? "text-amber-600" : "text-slate-400"}`}>
+                                              {cloudBackupMetadata.hasActiveSession ? "جلسات نشطة" : "لا يوجد"}
+                                            </span>
+                                          </div>
+                                          {cloudBackupMetadata.hasActiveSession && user?.role && ["program_manager", "general_manager", "system_admin", "super_admin"].includes(user.role) && (
+                                            <button
+                                              type="button"
+                                              onClick={handleForceClearActiveSession}
+                                              className="w-full mt-1.5 font-bold text-[8.5px] py-1 px-1.5 border border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100 rounded-lg cursor-pointer transition-all active:scale-95 text-center focus:outline-none"
+                                            >
+                                              تصفير الجلسة 🗑️
+                                            </button>
+                                          )}
+                                        </div>
+
+                                        <div className="bg-white p-2.5 rounded-xl border border-slate-150 space-y-1">
+                                          <span className="text-[9px] font-bold text-slate-400 block pb-0.5 text-right">جلسات مؤرشفة</span>
+                                          <span className="text-[10.5px] font-black text-blue-700 block text-right">
+                                            {cloudBackupMetadata.sessionCount} جلسة
+                                          </span>
+                                        </div>
+
+                                        <div className="bg-white p-2.5 rounded-xl border border-slate-150 space-y-1">
+                                          <span className="text-[9px] font-bold text-slate-400 block pb-0.5 text-left">جلسات محذوفة</span>
+                                          <span className="text-[10.5px] font-black text-rose-600 block text-left">
+                                            {cloudBackupMetadata.deletedSessionCount !== undefined ? `${cloudBackupMetadata.deletedSessionCount} جلسة` : '0 جلسة'}
+                                          </span>
+                                        </div>
+                                      </div>
+
+                                      {/* Bottom Row: Inventory Mirror */}
+                                      <div className="bg-emerald-50/40 p-2.5 rounded-xl border border-emerald-100/50 space-y-1">
+                                        <div className="flex items-center justify-between">
+                                          <span className="text-[9px] font-bold text-emerald-600/70">مرآة المخزون (Mirror Inventory)</span>
+                                          <span className="text-[10.5px] font-black text-emerald-900">{cloudBackupMetadata.masterItemCount} صنف</span>
+                                        </div>
+                                        <button 
+                                          onClick={() => setIsShowingMirror(true)} 
+                                          className="w-full mt-1.5 text-[8.5px] bg-white border border-emerald-200 text-emerald-700 font-bold py-1 px-1.5 rounded-lg hover:bg-emerald-100 transition-all cursor-pointer shadow-sm active:scale-95"
+                                        >
+                                          استعراض 🔍
+                                        </button>
+                                      </div>
+                                      
+                                      <div className="h-0.5 bg-slate-100 rounded-full w-2/3 mx-auto opacity-50"></div>
                                     </div>
                                   </div>
                                 ) : (
@@ -5979,11 +6055,12 @@ export default function App() {
                         <select 
                           value={storesManagerSubTab}
                           onChange={(e) => setStoresManagerSubTab(e.target.value as any)}
-                          className="pl-6 pr-2 py-0 bg-amber-50 border border-amber-200 rounded-lg text-[9px] font-black text-amber-800 focus:ring-1 focus:ring-amber-500/20 focus:border-amber-400 outline-none appearance-none cursor-pointer text-right transition-all h-[26px] w-[115px] min-w-[115px] max-w-[115px] shadow-sm"
+                          className="pl-6 pr-2 py-0 bg-amber-50 border border-amber-200 rounded-lg text-[9px] font-black text-amber-800 focus:ring-1 focus:ring-amber-500/20 focus:border-amber-400 outline-none appearance-none cursor-pointer text-right transition-all h-[26px] w-[130px] min-w-[130px] max-w-[130px] shadow-sm"
                         >
                           <option value="items">اصناف الجرد 📦</option>
                           <option value="auditors">كادر بشري 👥</option>
                           <option value="general">مراجعة عامة 📊</option>
+                          <option value="smart_analytics">تحليلات ذكية 🧠</option>
                         </select>
                         <div className="absolute left-1.5 top-1/2 -translate-y-1/2 pointer-events-none text-amber-500">
                           <ChevronDown className="w-3 h-3" />
@@ -6090,15 +6167,20 @@ export default function App() {
                                           {(session as any).versionNumber}
                                         </span>
                                       )}
+                                      {session.id && (
+                                        <span className="bg-slate-100 text-slate-600 border border-slate-200 px-1.5 py-0.5 rounded text-[9px] font-mono leading-none shrink-0" title={`معرف الجلسة: ${session.id}`}>
+                                          #{session.id}
+                                        </span>
+                                      )}
                                     </div>
+                                  </div>
+                                  <div className="flex items-center gap-1.5 mt-1 pt-1.5 border-t border-slate-100 justify-start w-full flex-wrap">
                                     <span className="text-[9px] font-bold text-blue-600 bg-blue-50 px-1.5 flex items-center justify-center py-0.5 rounded-md">
                                       بواسطة: {getStorekeeperName(session.archivedBy || session.storekeeperCode)}
                                     </span>
-                                  </div>
-                                  <div className="flex items-center gap-1.5 mt-1 pt-1.5 border-t border-slate-100 justify-start w-full">
-                                    <span className="text-[10px] text-slate-500 font-bold flex items-center gap-1 w-full justify-start">
+                                    <span className="text-[10px] text-slate-500 font-bold flex items-center gap-1">
                                       <Clock className="w-2.5 h-2.5 text-emerald-500" />
-                                      تمت الأرشفة النهائية: 
+                                      أرشفة: 
                                       <span className="text-emerald-700 font-mono" dir="ltr">
                                         {new Date(session.archivedAt || session.updatedAt || session.date).toLocaleString("ar-EG", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                                       </span>
@@ -6126,25 +6208,54 @@ export default function App() {
                               </div>
 
                               {/* Options inside past session item */}
-                              <div className="pt-2 flex items-center justify-between gap-1.5 border-t border-slate-100">
+                              <div className="pt-2 flex flex-wrap items-center justify-between gap-1.5 border-t border-slate-100">
                                 <button
                                   type="button"
-                                  onClick={() => setInspectSession(session)}
-                                  className="flex-1 px-1 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-[9px] sm:text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 cursor-pointer"
+                                  onClick={() => {
+                                    setInspectSession(session);
+                                    setIsEditingInspectSession(false);
+                                    setIsEditingVariancesOnly(false);
+                                  }}
+                                  className="flex-1 px-1 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-[9px] sm:text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 cursor-pointer min-w-[70px]"
                                   title="عرض المقارنات"
                                 >
                                   عرض المقارنات
                                   <Eye className="w-3.5 h-3.5 shrink-0" />
                                 </button>
+                                {['supervisor', 'warehouse_supervisor', 'stores_manager', 'program_manager', 'system_admin'].includes(user?.role || '') && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setInspectSession(session);
+                                        setIsEditingInspectSession(false);
+                                        setIsEditingVariancesOnly(true);
+                                      }}
+                                      className="flex-1 px-1 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-[9px] sm:text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 cursor-pointer min-w-[80px]"
+                                      title="توضيح فروقات الأصناف في هذا الجرد المؤرشف"
+                                    >
+                                      توضيح الفروقات
+                                      <ScrollText className="w-3.5 h-3.5 shrink-0" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleExportVariances(session)}
+                                      className="flex-1 px-1 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[9px] sm:text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 cursor-pointer min-w-[80px]"
+                                      title="تصدير الفروقات المصنفة لملف Excel"
+                                    >
+                                      تصدير الفروقات
+                                      <FileDown className="w-3.5 h-3.5 shrink-0" />
+                                    </button>
+                                  </>
+                                )}
                                 {user?.role === 'program_manager' && (
                                   <button
                                     type="button"
                                     onClick={() => handleExportCsv(session, `جرد_مؤرشف_${new Date(session.archivedAt || session.updatedAt || session.date).toISOString().split("T")[0]}.csv`)}
-                                    className="flex-1 px-1 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 text-[9px] sm:text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 cursor-pointer"
+                                    className="px-1 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 text-[9px] sm:text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 cursor-pointer shrink-0"
                                     title="تحميل التفاصيل"
                                   >
                                     <FileDown className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                                    تحميل التفاصيل
                                   </button>
                                 )}
                                 {user?.role === 'program_manager' && (
@@ -6154,7 +6265,7 @@ export default function App() {
                                       setDeletionTarget({ type: 'archived', id: session.id });
                                       setShowDeletionReasonModal(true);
                                     }}
-                                    className={`px-2 py-1.5 flex items-center justify-center gap-1 text-[9px] sm:text-[10px] font-bold rounded-lg cursor-pointer transition-all border shrink-0 min-w[50px] bg-white border-red-100 hover:bg-red-50 text-rose-600 hover:border-rose-200`}
+                                    className={`px-2 py-1.5 flex items-center justify-center gap-1 text-[9px] sm:text-[10px] font-bold rounded-lg cursor-pointer transition-all border shrink-0 bg-white border-red-100 hover:bg-red-50 text-rose-600 hover:border-rose-200`}
                                     title="حذف هذا الجرد المؤرشف"
                                   >
                                     <Trash2 className="w-3.5 h-3.5 shrink-0" />
@@ -6337,6 +6448,9 @@ export default function App() {
                               {['warehouse_supervisor', 'system_admin', 'supervisor'].includes(user?.role || '') && (
                                 <col className="w-[72px]" />
                               )}
+                              {['warehouse_supervisor', 'supervisor', 'program_manager'].includes(user?.role || '') && (
+                                <col className="w-36" />
+                              )}
                               {user?.role === 'program_manager' && <col className="w-6" />}
                             </>
                           )}
@@ -6359,6 +6473,9 @@ export default function App() {
                                 <th className="py-1 px-0.5 bg-slate-100 text-slate-500 font-bold border-b border-slate-200 text-center font-bold font-mono whitespace-nowrap text-[8.5px]">سابق</th>
                                 {(user?.role === 'warehouse_supervisor' || user?.role === 'system_admin' || user?.role === 'supervisor') && (
                                   <th className="py-1 px-0.5 bg-slate-100 text-slate-700 font-bold border-b border-slate-200 text-center whitespace-nowrap text-[8.5px]">إعادة</th>
+                                )}
+                                {['warehouse_supervisor', 'supervisor', 'program_manager'].includes(user?.role || '') && (
+                                  <th className="py-1 px-0.5 bg-slate-100 text-slate-700 font-bold border-b border-slate-200 text-center whitespace-nowrap text-[9.5px]">توضيح الفرق</th>
                                 )}
                                 {user?.role === 'program_manager' && (
                                   <th className="py-1 px-0.5 bg-slate-100 text-slate-650 font-bold border-b border-slate-200 text-center whitespace-nowrap text-[8.5px]">X</th>
@@ -6421,29 +6538,21 @@ export default function App() {
                                         <span className="text-[9px] bg-emerald-100 text-emerald-800 border border-emerald-200 font-extrabold px-1.5 py-0.5 rounded-md flex items-center gap-1 shadow-3xs" title="عدد مرات إعادة الجرد">
                                           🔄 ({item.storekeeperModifications.length})
                                         </span>
-                                        {item.storekeeperModifications.map((mod: any, idx: number) => (
-                                          <span key={idx} className="text-[8px] bg-orange-50 text-orange-700 border border-orange-100 font-bold px-1.5 py-0.5 rounded-md flex items-center gap-0.5 shadow-3xs" title={`المعدل: ${mod.modifiedByName || "أمين مخزن"}`}>
-                                            <span className="opacity-75 text-[7px]">{mod.modifiedByName || "أمين"}:</span>
-                                            <span className="opacity-75">{mod.oldQty === null ? "—" : mod.oldQty}</span>
-                                            <span className="text-[8px] text-emerald-600">➔</span>
-                                            <span className="font-black text-slate-800">{mod.newQty === null ? "—" : mod.newQty}</span>
-                                          </span>
-                                        ))}
+                                      </div>
+                                    )}
+                                    {item.inventoriedByName && (
+                                      <div className="text-[8px] text-emerald-600 font-bold mt-0.5 flex flex-col items-start gap-0 leading-none">
+                                        <div className="flex flex-row gap-1 items-center">
+                                          <span>{item.inventoriedByName}</span>
+                                          {item.inventoriedAt && (
+                                            <span className="text-[7.5px] text-emerald-600/75 font-mono">
+                                              ({new Date(item.inventoriedAt).toLocaleTimeString('ar-EG', {hour: '2-digit', minute:'2-digit'})})
+                                            </span>
+                                          )}
+                                        </div>
                                       </div>
                                     )}
                                   </div>
-                                  {item.inventoriedByName && (
-                                    <div className="text-[8px] text-emerald-600 font-bold mt-0.5 flex flex-col items-start gap-0 leading-none selection:bg-blue-105">
-                                      <div className="flex flex-row gap-1 items-center">
-                                        <span>{item.inventoriedByName}</span>
-                                        {item.inventoriedAt && (
-                                          <span className="text-[7.5px] text-emerald-600/75 font-mono">
-                                            ({new Date(item.inventoriedAt).toLocaleTimeString('ar-EG', {hour: '2-digit', minute:'2-digit'})})
-                                          </span>
-                                        )}
-                                      </div>
-                                    </div>
-                                  )}
                                 </td>
 
                                 {/* Storekeeper assignment column */}
@@ -6789,6 +6898,65 @@ export default function App() {
                                         ) : (
                                           <span className="text-[10px] text-slate-300 font-medium">—</span>
                                         )}
+                                      </td>
+                                    )}
+                                    {['warehouse_supervisor', 'supervisor', 'program_manager'].includes(user?.role || '') && (
+                                      <td className="py-1 px-1 border-b border-slate-100 text-center">
+                                        <div className="flex items-center gap-1 justify-center">
+                                          <select
+                                            value={item.varianceReason || 'أخرى'}
+                                            onChange={(e) => {
+                                              const val = e.target.value as any;
+                                              if (activeSession) {
+                                                const updatedItems = activeSession.items.map(it => {
+                                                  if (it.itemId === item.itemId) {
+                                                    return {
+                                                      ...it,
+                                                      varianceReason: val,
+                                                      varianceNotes: val === 'أخرى' ? '' : (it.varianceNotes || '')
+                                                    };
+                                                  }
+                                                  return it;
+                                                });
+                                                const updatedSession = {
+                                                  ...activeSession,
+                                                  items: updatedItems
+                                                };
+                                                setActiveSession(updatedSession);
+                                                localStorage.setItem("inventory_active_session", JSON.stringify(updatedSession));
+                                                pushStateToServer({ activeSession: updatedSession }, { isExplicitAction: false });
+                                              }
+                                            }}
+                                            className="text-[10px] bg-white border border-slate-200 rounded px-1 py-0.5 font-sans focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer w-24"
+                                          >
+                                            <option value="أخرى">أخرى</option>
+                                            <option value="خطأ جرد">خطأ جرد</option>
+                                            <option value="خطأ انتاج">خطأ انتاج</option>
+                                            <option value="خطأ تحميل">خطأ تحميل</option>
+                                          </select>
+                                          
+                                          {item.varianceReason && item.varianceReason !== 'أخرى' && (
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                setSelectedVarianceItem({
+                                                  itemId: item.itemId,
+                                                  itemName: item.itemName,
+                                                  varianceReason: item.varianceReason || 'أخرى',
+                                                  varianceNotes: item.varianceNotes || '',
+                                                  isFromPastSession: false
+                                                });
+                                                setShowVarianceNotesModal(true);
+                                              }}
+                                              className={`p-1 rounded hover:bg-slate-100 transition-colors cursor-pointer ${
+                                                item.varianceNotes ? "text-blue-600 font-bold" : "text-slate-400"
+                                              }`}
+                                              title={item.varianceNotes ? `تعديل الملاحظات: ${item.varianceNotes}` : "إضافة ملاحظات توضيحية للخطأ"}
+                                            >
+                                              <FileText className="w-3.5 h-3.5" />
+                                            </button>
+                                          )}
+                                        </div>
                                       </td>
                                     )}
                                     {user?.role === 'program_manager' && (
@@ -7679,11 +7847,24 @@ export default function App() {
                       </div>
                       {/* Grid Columns Table Header for perfect alignment and zero overflow */}
                       <div className="grid grid-cols-12 gap-1 bg-slate-50 border-b border-slate-100 px-2 py-1.5 text-center text-[9px] font-extrabold text-slate-500 font-sans" dir="rtl">
-                        <div className="col-span-4 text-right pr-1">اسم الصنف</div>
-                        <div className="col-span-2">الرصيد الدفتري</div>
-                        <div className="col-span-2">الرصيد الفعلي</div>
-                        <div className="col-span-2">طبيعة المطابقة</div>
-                        <div className="col-span-2">فرق سابق</div>
+                        {['warehouse_supervisor', 'supervisor', 'program_manager'].includes(user?.role || '') ? (
+                          <>
+                            <div className="col-span-3 text-right pr-1">اسم الصنف</div>
+                            <div className="col-span-2">الرصيد الدفتري</div>
+                            <div className="col-span-2">الرصيد الفعلي</div>
+                            <div className="col-span-2">طبيعة المطابقة</div>
+                            <div className="col-span-1">سابق</div>
+                            <div className="col-span-2 text-center">توضيح الفرق</div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="col-span-4 text-right pr-1">اسم الصنف</div>
+                            <div className="col-span-2">الرصيد الدفتري</div>
+                            <div className="col-span-2">الرصيد الفعلي</div>
+                            <div className="col-span-2">طبيعة المطابقة</div>
+                            <div className="col-span-2">فرق سابق</div>
+                          </>
+                        )}
                       </div>
                       <div className="max-h-72 overflow-y-auto divide-y divide-slate-100">
                         {sessionItems.map((item) => {
@@ -7692,94 +7873,224 @@ export default function App() {
 
                           return (
                             <div key={item.itemId} className="px-2 py-2 grid grid-cols-12 gap-1 items-center text-center text-[10px] hover:bg-slate-50 text-slate-700 transition-colors" dir="rtl">
-                              <div className="col-span-4 text-right pr-1">
-                                <span className="font-bold text-slate-800 block text-[10px] break-words leading-tight" title={item.itemName}>{item.itemName}</span>
-                                {item.storekeeperModifications && item.storekeeperModifications.length > 0 && (
-                                  <div className="mt-1 flex gap-1 items-start flex-wrap">
-                                    <span className="text-[8px] bg-emerald-100 text-emerald-800 border border-emerald-200 font-extrabold px-1 py-0.5 rounded-sm flex items-center gap-1 shadow-3xs" title="عدد مرات إعادة الجرد">
-                                      🔄 ({item.storekeeperModifications.length})
-                                    </span>
-                                    {item.storekeeperModifications.map((mod: any, idx: number) => (
-                                      <span key={idx} className="text-[7.5px] bg-emerald-50 text-emerald-700 border border-emerald-100 font-bold px-1 py-0.5 rounded-sm flex items-center gap-0.5 shadow-3xs" title={`المعدل: ${mod.modifiedByName || "أمين مخزن"}`}>
-                                        <span className="opacity-75 text-[7px]">{mod.modifiedByName || "أمين"}:</span>
-                                        <span className="opacity-75">{mod.oldQty}</span>
-                                        <span className="text-[8px]">←</span>
-                                        <span>{mod.newQty}</span>
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
-                                {item.inventoriedByName && (
-                                  <div className="text-[8px] text-emerald-600 font-bold mt-0.5 flex flex-col items-start gap-0.5 leading-none">
-                                    <div className="flex flex-row gap-0.5 items-center">
-                                      <span>{item.inventoriedByName}</span>
-                                      {item.inventoriedAt && (
-                                        <span className="text-[8px] text-emerald-600/75 font-mono">
-                                          ({new Date(item.inventoriedAt).toLocaleTimeString('ar-EG', {hour: '2-digit', minute:'2-digit'})})
+                              {['warehouse_supervisor', 'supervisor', 'program_manager'].includes(user?.role || '') ? (
+                                <>
+                                  <div className="col-span-3 text-right pr-1">
+                                    <span className="font-bold text-slate-800 block text-[10px] break-words leading-tight" title={item.itemName}>{item.itemName}</span>
+                                    {item.storekeeperModifications && item.storekeeperModifications.length > 0 && (
+                                      <div className="mt-1 flex gap-1 items-start flex-wrap">
+                                        <span className="text-[8px] bg-emerald-100 text-emerald-800 border border-emerald-200 font-extrabold px-1 py-0.5 rounded-sm flex items-center gap-1 shadow-3xs" title="عدد مرات إعادة الجرد">
+                                          🔄 ({item.storekeeperModifications.length})
                                         </span>
+                                      </div>
+                                    )}
+                                    {item.inventoriedByName && (
+                                      <div className="text-[8px] text-emerald-600 font-bold mt-0.5 flex flex-col items-start gap-0.5 leading-none">
+                                        <div className="flex flex-row gap-0.5 items-center">
+                                          <span>{item.inventoriedByName}</span>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  <div className="col-span-2 font-mono font-bold text-slate-600">
+                                    {item.bookQty}
+                                  </div>
+
+                                  <div className="col-span-2 font-mono font-bold text-blue-700 flex justify-center items-center">
+                                    {isEditingInspectSession ? (
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        value={item.physicalQty === null ? "" : item.physicalQty}
+                                        onChange={(e) => {
+                                          const val = e.target.value;
+                                          const newQty = val === "" ? null : Number(val);
+                                          const newItems = (inspectSession.items || []).map(i => {
+                                            if (i.itemId === item.itemId) {
+                                              const roleUpdates: any = {};
+                                              if (user?.role === 'program_manager') roleUpdates.managerQty = newQty;
+                                              else if (['supervisor', 'warehouse_supervisor', 'stores_manager'].includes(user?.role || '')) roleUpdates.supervisorQty = newQty;
+                                              else if (user?.role === 'storekeeper') roleUpdates.storekeeperQty = newQty;
+
+                                              return { 
+                                                ...i, 
+                                                physicalQty: newQty, 
+                                                ...roleUpdates,
+                                                inventoriedByCode: user?.code,
+                                                inventoriedByName: user?.name,
+                                                inventoriedAt: new Date().toISOString()
+                                              };
+                                            }
+                                            return i;
+                                          });
+                                          setInspectSession({ ...inspectSession, items: newItems });
+                                        }}
+                                        className="w-14 px-1 py-0.5 text-center border border-blue-200 rounded text-xs no-spin focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
+                                      />
+                                    ) : (
+                                      isCounted ? item.physicalQty : "—"
+                                    )}
+                                  </div>
+
+                                  <div className="col-span-2 text-center font-sans">
+                                    {!isCounted ? (
+                                      <span className="text-[8px] text-slate-400 font-bold">بانتظار الجرد</span>
+                                    ) : diff === 0 ? (
+                                      <span className="text-[9px] text-blue-600 font-extrabold">مطابق ✨</span>
+                                    ) : diff < 0 ? (
+                                      <span className="text-[9px] text-red-600 font-extrabold">عجز ({diff}) 📉</span>
+                                    ) : (
+                                      <span className="text-[9px] text-emerald-600 font-extrabold">زيادة (+{diff}) 📈</span>
+                                    )}
+                                  </div>
+
+                                  <div className="col-span-1 text-center font-mono text-[9px] text-slate-600 font-semibold">
+                                    {item.previousDiff !== undefined ? (
+                                      item.previousDiff === 0 ? "0" : item.previousDiff > 0 ? `+${item.previousDiff}` : item.previousDiff
+                                    ) : "—"}
+                                  </div>
+
+                                  {/* توضيح الفرق */}
+                                  <div className="col-span-2 text-center font-sans">
+                                    <div className="flex items-center gap-1 justify-center">
+                                      {(isEditingInspectSession || isEditingVariancesOnly) ? (
+                                        <>
+                                          <select
+                                            value={item.varianceReason || 'أخرى'}
+                                            onChange={(e) => {
+                                              const val = e.target.value as any;
+                                              const newItems = (inspectSession.items || []).map(i => {
+                                                if (i.itemId === item.itemId) {
+                                                  return {
+                                                    ...i,
+                                                    varianceReason: val,
+                                                    varianceNotes: val === 'أخرى' ? '' : (i.varianceNotes || '')
+                                                  };
+                                                }
+                                                return i;
+                                              });
+                                              setInspectSession({ ...inspectSession, items: newItems });
+                                            }}
+                                            className="text-[9px] bg-white border border-slate-200 rounded px-1 py-0.5 font-sans focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer w-20"
+                                          >
+                                            <option value="أخرى">أخرى</option>
+                                            <option value="خطأ جرد">خطأ جرد</option>
+                                            <option value="خطأ انتاج">خطأ انتاج</option>
+                                            <option value="خطأ تحميل">خطأ تحميل</option>
+                                          </select>
+                                          {item.varianceReason && item.varianceReason !== 'أخرى' && (
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                setSelectedVarianceItem({
+                                                  itemId: item.itemId,
+                                                  itemName: item.itemName,
+                                                  varianceReason: item.varianceReason || 'أخرى',
+                                                  varianceNotes: item.varianceNotes || '',
+                                                  isFromPastSession: true,
+                                                  pastSessionId: inspectSession.id
+                                                });
+                                                setShowVarianceNotesModal(true);
+                                              }}
+                                              className={`p-1 rounded hover:bg-slate-100 transition-colors cursor-pointer ${
+                                                item.varianceNotes ? "text-blue-600 font-bold" : "text-slate-400"
+                                              }`}
+                                              title={item.varianceNotes ? `تعديل الملاحظات: ${item.varianceNotes}` : "إضافة ملاحظات توضيحية للخطأ"}
+                                            >
+                                              <FileText className="w-3.5 h-3.5" />
+                                            </button>
+                                          )}
+                                        </>
+                                      ) : (
+                                        <div className="flex items-center gap-1 justify-center">
+                                          <span className={`px-1.5 py-0.5 rounded-md text-[9px] font-bold ${
+                                            !item.varianceReason || item.varianceReason === 'أخرى'
+                                              ? 'bg-slate-100 text-slate-600'
+                                              : item.varianceReason === 'خطأ جرد'
+                                              ? 'bg-amber-100 text-amber-700 border border-amber-200'
+                                              : item.varianceReason === 'خطأ انتاج'
+                                              ? 'bg-indigo-100 text-indigo-700 border border-indigo-200'
+                                              : 'bg-rose-100 text-rose-700 border border-rose-200'
+                                          }`}>
+                                            {item.varianceReason || 'أخرى'}
+                                          </span>
+                                          {item.varianceNotes && (
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                setSelectedVarianceItem({
+                                                  itemId: item.itemId,
+                                                  itemName: item.itemName,
+                                                  varianceReason: item.varianceReason || 'أخرى',
+                                                  varianceNotes: item.varianceNotes || '',
+                                                  isFromPastSession: false
+                                                });
+                                                setShowVarianceNotesModal(true);
+                                              }}
+                                              className="p-1 text-slate-400 hover:text-blue-600 transition-colors cursor-pointer"
+                                              title={item.varianceNotes}
+                                            >
+                                              <Info className="w-3 h-3" />
+                                            </button>
+                                          )}
+                                        </div>
                                       )}
                                     </div>
                                   </div>
-                                )}
-                              </div>
+                                </>
+                              ) : (
+                                <>
+                                  <div className="col-span-4 text-right pr-1">
+                                    <span className="font-bold text-slate-800 block text-[10px] break-words leading-tight" title={item.itemName}>{item.itemName}</span>
+                                    {item.storekeeperModifications && item.storekeeperModifications.length > 0 && (
+                                      <div className="mt-1 flex gap-1 items-start flex-wrap">
+                                        <span className="text-[8px] bg-emerald-100 text-emerald-800 border border-emerald-200 font-extrabold px-1 py-0.5 rounded-sm flex items-center gap-1 shadow-3xs" title="عدد مرات إعادة الجرد">
+                                          🔄 ({item.storekeeperModifications.length})
+                                        </span>
+                                      </div>
+                                    )}
+                                    {item.inventoriedByName && (
+                                      <div className="text-[8px] text-emerald-600 font-bold mt-0.5 flex flex-col items-start gap-0.5 leading-none">
+                                        <div className="flex flex-row gap-0.5 items-center">
+                                          <span>{item.inventoriedByName}</span>
+                                          {item.inventoriedAt && (
+                                            <span className="text-[8px] text-emerald-600/75 font-mono">
+                                              ({new Date(item.inventoriedAt).toLocaleTimeString('ar-EG', {hour: '2-digit', minute:'2-digit'})})
+                                            </span>
+                                          )}
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
 
-                              <div className="col-span-2 font-mono font-bold text-slate-600">
-                                {item.bookQty}
-                              </div>
+                                  <div className="col-span-2 font-mono font-bold text-slate-600">
+                                    {item.bookQty}
+                                  </div>
 
-                              <div className="col-span-2 font-mono font-bold text-blue-700 flex justify-center items-center">
-                                {isEditingInspectSession ? (
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    value={item.physicalQty === null ? "" : item.physicalQty}
-                                    onChange={(e) => {
-                                      const val = e.target.value;
-                                      const newQty = val === "" ? null : Number(val);
-                                      const newItems = (inspectSession.items || []).map(i => {
-                                        if (i.itemId === item.itemId) {
-                                          const roleUpdates: any = {};
-                                          if (user?.role === 'program_manager') roleUpdates.managerQty = newQty;
-                                          else if (['supervisor', 'warehouse_supervisor', 'stores_manager'].includes(user?.role || '')) roleUpdates.supervisorQty = newQty;
-                                          else if (user?.role === 'storekeeper') roleUpdates.storekeeperQty = newQty;
+                                  <div className="col-span-2 font-mono font-bold text-blue-700 flex justify-center items-center">
+                                    {isCounted ? item.physicalQty : "—"}
+                                  </div>
 
-                                          return { 
-                                            ...i, 
-                                            physicalQty: newQty, 
-                                            ...roleUpdates,
-                                            inventoriedByCode: user?.code,
-                                            inventoriedByName: user?.name,
-                                            inventoriedAt: new Date().toISOString()
-                                          };
-                                        }
-                                        return i;
-                                      });
-                                      setInspectSession({ ...inspectSession, items: newItems });
-                                    }}
-                                    className="w-14 px-1 py-0.5 text-center border border-blue-200 rounded text-xs no-spin focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
-                                  />
-                                ) : (
-                                  isCounted ? item.physicalQty : "—"
-                                )}
-                              </div>
+                                  <div className="col-span-2 text-center font-sans">
+                                    {!isCounted ? (
+                                      <span className="text-[8px] text-slate-400 font-bold">بانتظار الجرد</span>
+                                    ) : diff === 0 ? (
+                                      <span className="text-[9px] text-blue-600 font-extrabold">مطابق ✨</span>
+                                    ) : diff < 0 ? (
+                                      <span className="text-[9px] text-red-600 font-extrabold">عجز ({diff}) 📉</span>
+                                    ) : (
+                                      <span className="text-[9px] text-emerald-600 font-extrabold">زيادة (+{diff}) 📈</span>
+                                    )}
+                                  </div>
 
-                              <div className="col-span-2 text-center font-sans">
-                                {!isCounted ? (
-                                  <span className="text-[8px] text-slate-400 font-bold">بانتظار الجرد</span>
-                                ) : diff === 0 ? (
-                                  <span className="text-[9px] text-blue-600 font-extrabold">مطابق ✨</span>
-                                ) : diff < 0 ? (
-                                  <span className="text-[9px] text-red-600 font-extrabold">عجز ({diff}) 📉</span>
-                                ) : (
-                                  <span className="text-[9px] text-emerald-600 font-extrabold">زيادة (+{diff}) 📈</span>
-                                )}
-                              </div>
-
-                              <div className="col-span-2 text-center font-mono text-[9px] text-slate-600 font-semibold col-span-2">
-                                {item.previousDiff !== undefined ? (
-                                  item.previousDiff === 0 ? "0" : item.previousDiff > 0 ? `+${item.previousDiff}` : item.previousDiff
-                                ) : "—"}
-                              </div>
+                                  <div className="col-span-2 text-center font-mono text-[9px] text-slate-600 font-semibold">
+                                    {item.previousDiff !== undefined ? (
+                                      item.previousDiff === 0 ? "0" : item.previousDiff > 0 ? `+${item.previousDiff}` : item.previousDiff
+                                    ) : "—"}
+                                  </div>
+                                </>
+                              )}
                             </div>
                           );
                         })}
@@ -7799,30 +8110,46 @@ export default function App() {
             {/* Modal Footer */}
             <div className="p-4 border-t border-slate-100 bg-slate-50 rounded-b-2xl flex items-center justify-between">
               <button
-                onClick={() => { setInspectSession(null); setConfirmingRestoreSessionId(null); setIsEditingInspectSession(false); setShowInspectModifications(false); }}
+                onClick={() => { setInspectSession(null); setConfirmingRestoreSessionId(null); setIsEditingInspectSession(false); setIsEditingVariancesOnly(false); setShowInspectModifications(false); }}
                 className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 font-semibold rounded-xl text-xs transition-colors cursor-pointer"
               >
                 إغلاق
               </button>
-              {(user?.role === 'program_manager' || user?.role === 'system_admin' || user?.role === 'super_admin') && (
-                <div className="flex items-center gap-2">
-                  {isEditingInspectSession ? (
-                    <div className="flex items-center gap-1.5 mt-1">
-                      <button
-                        onClick={handleSaveArchivedSession}
-                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold rounded-xl text-[11px] flex items-center justify-center shadow-xs cursor-pointer transition-colors"
-                      >
-                        حفظ التعديلات
-                      </button>
-                      <button
-                        onClick={() => setIsEditingInspectSession(false)}
-                        className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 font-extrabold rounded-xl text-[11px] cursor-pointer transition-colors shadow-xs"
-                      >
-                        إلغاء التعديل
-                      </button>
-                    </div>
-                  ) : (
-                    <>
+              
+              <div className="flex items-center gap-2">
+                {isEditingInspectSession ? (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={handleSaveArchivedSession}
+                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold rounded-xl text-[11px] flex items-center justify-center shadow-xs cursor-pointer transition-colors"
+                    >
+                      حفظ التعديلات
+                    </button>
+                    <button
+                      onClick={() => setIsEditingInspectSession(false)}
+                      className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 font-extrabold rounded-xl text-[11px] cursor-pointer transition-colors shadow-xs"
+                    >
+                      إلغاء التعديل
+                    </button>
+                  </div>
+                ) : isEditingVariancesOnly ? (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={handleSaveArchivedSession}
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold rounded-xl text-[11px] flex items-center justify-center shadow-xs cursor-pointer transition-colors"
+                    >
+                      حفظ فروقات الأصناف
+                    </button>
+                    <button
+                      onClick={() => setIsEditingVariancesOnly(false)}
+                      className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 font-extrabold rounded-xl text-[11px] cursor-pointer transition-colors shadow-xs"
+                    >
+                      إلغاء
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5">
+                    {(user?.role === 'program_manager' || user?.role === 'system_admin' || user?.role === 'super_admin') && (
                       <button
                         onClick={() => {
                           setIsEditingInspectSession(true);
@@ -7842,18 +8169,31 @@ export default function App() {
                       >
                         تعديل الجرد
                       </button>
+                    )}
+                    
+                    {['supervisor', 'warehouse_supervisor', 'stores_manager', 'program_manager', 'system_admin'].includes(user?.role || '') && (
                       <button
                         onClick={() => {
-                          handleExportCsv(inspectSession, `جرد_تاريخي_${new Date(inspectSession.date).toISOString().split("T")[0]}.csv`);
+                          setIsEditingVariancesOnly(true);
                         }}
-                        className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-extrabold rounded-xl text-[11px] flex items-center justify-center cursor-pointer shadow-xs transition-colors"
+                        className="px-5 py-2 font-extrabold rounded-xl text-[11px] flex items-center justify-center shadow-xs transition-all bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer"
+                        title="تعديل وتوضيح الفروقات والأخطاء للأصناف"
                       >
-                        تحميل التقرير
+                        تعديل الفروقات
                       </button>
-                    </>
-                  )}
-                </div>
-              )}
+                    )}
+
+                    <button
+                      onClick={() => {
+                        handleExportCsv(inspectSession, `جرد_تاريخي_${new Date(inspectSession.date).toISOString().split("T")[0]}.csv`);
+                      }}
+                      className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-extrabold rounded-xl text-[11px] flex items-center justify-center cursor-pointer shadow-xs transition-colors"
+                    >
+                      تحميل التقرير
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -7930,6 +8270,116 @@ export default function App() {
       <footer className="border-t border-slate-100 text-center text-[10px] text-slate-400 font-extrabold bg-white py-2 mt-auto sticky bottom-0 z-30 shadow-[0_-2px_10px_rgba(0,0,0,0.03)] w-full">
         تم تصميم النظام بواسطة : <span className="text-slate-900 font-black">محمد ثروت</span>
       </footer>
+
+      {/* Variance Explanation Notes Modal */}
+      {showVarianceNotesModal && selectedVarianceItem && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-[150] flex items-center justify-center p-4" dir="rtl">
+          <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl border border-slate-100 overflow-hidden">
+            <div className="bg-indigo-600 p-5 text-white text-right flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold">ملاحظات توضيح الخطأ للأصناف</h3>
+                <p className="text-[10px] text-indigo-100 mt-1">تحديد توضيحي تفصيلي لسبب الاختلاف في الجرد</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowVarianceNotesModal(false);
+                  setSelectedVarianceItem(null);
+                }}
+                className="p-1 hover:bg-white/10 rounded-full transition-colors text-indigo-100 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 space-y-2">
+                <div className="flex justify-between items-center text-[10px] font-extrabold text-slate-500">
+                  <span>كود الصنف:</span>
+                  <span className="font-mono text-slate-700 font-bold">#{selectedVarianceItem.itemId}</span>
+                </div>
+                <div className="text-right text-[11px] font-extrabold text-slate-900 leading-tight">
+                  {selectedVarianceItem.itemName}
+                </div>
+                <div className="flex justify-between items-center text-[10px] font-extrabold text-slate-500">
+                  <span>تصنيف الخطأ المعتمد:</span>
+                  <span className="text-indigo-600 font-bold">{selectedVarianceItem.varianceReason}</span>
+                </div>
+              </div>
+
+              <div className="space-y-1.5 text-right">
+                <label className="block text-[11px] font-extrabold text-slate-500">
+                  تفاصيل وملاحظات الخطأ:
+                </label>
+                {selectedVarianceItem.isFromPastSession === false && !['supervisor', 'warehouse_supervisor', 'stores_manager', 'program_manager', 'system_admin'].includes(user?.role || '') ? (
+                  // View only
+                  <div className="bg-white p-3 rounded-lg border border-slate-200 text-[11px] font-medium text-slate-700 min-h-24 whitespace-pre-wrap">
+                    {selectedVarianceItem.varianceNotes || "لا توجد ملاحظات"}
+                  </div>
+                ) : (
+                  // Editable
+                  <textarea
+                    rows={4}
+                    value={varianceNotesTempText}
+                    onChange={(e) => setVarianceNotesTempText(e.target.value)}
+                    placeholder="اكتب هنا تفاصيل الخطأ بدقة لتسهيل المتابعة التاريخية لاحقاً..."
+                    className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-indigo-500 text-right font-sans"
+                  />
+                )}
+              </div>
+
+              <div className="flex gap-2">
+                {(selectedVarianceItem.isFromPastSession || ['supervisor', 'warehouse_supervisor', 'stores_manager', 'program_manager', 'system_admin'].includes(user?.role || '')) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const updatedNotes = varianceNotesTempText;
+                      if (selectedVarianceItem.isFromPastSession && inspectSession) {
+                        // Modifying inside pastSession (Inspect Session modal)
+                        const updatedItems = (inspectSession.items || []).map(i => {
+                          if (i.itemId === selectedVarianceItem.itemId) {
+                            return { ...i, varianceNotes: updatedNotes };
+                          }
+                          return i;
+                        });
+                        setInspectSession({ ...inspectSession, items: updatedItems });
+                      } else if (activeSession) {
+                        // Modifying activeSession
+                        const updatedItems = activeSession.items.map(i => {
+                          if (i.itemId === selectedVarianceItem.itemId) {
+                            return { ...i, varianceNotes: updatedNotes };
+                          }
+                          return i;
+                        });
+                        const updatedSession = { ...activeSession, items: updatedItems };
+                        setActiveSession(updatedSession);
+                        localStorage.setItem("inventory_active_session", JSON.stringify(updatedSession));
+                        pushStateToServer({ activeSession: updatedSession }, { isExplicitAction: false });
+                      }
+                      setShowVarianceNotesModal(false);
+                      setSelectedVarianceItem(null);
+                      showToast("✅ تم حفظ الملاحظات التوضيحية بنجاح!", "success");
+                    }}
+                    className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs shadow-md shadow-indigo-100 transition-colors cursor-pointer"
+                  >
+                    حفظ الملاحظات
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowVarianceNotesModal(false);
+                    setSelectedVarianceItem(null);
+                  }}
+                  className="flex-1 py-2.5 bg-slate-150 hover:bg-slate-200 text-slate-600 font-bold rounded-xl text-xs transition-colors cursor-pointer text-center"
+                >
+                  إغلاق
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <DeletionReasonModal />
       

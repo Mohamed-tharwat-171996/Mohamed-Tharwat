@@ -201,18 +201,18 @@ async function startServer() {
                 console.error(`❌ Emergency recovery failed for [${expectedTag.toUpperCase()}]:`, recoveryErr);
              }
           }
+        }
 
-          // 🚀 CRITICAL CLOUD-SYNC FOR COLD STARTS AND REFRESHES:
-          // Synchronize snapshots, deleted sessions, and active state dynamically from Firestore to keep SQLite perfectly synchronized with Cloud.
-          try {
-            console.log(`☁️ Synchronizing active state, archived snapshots, and deleted sessions from Firestore for [${expectedTag.toUpperCase()}]...`);
-            await FirebaseBackupService.syncActiveStateFromCloud();
-            await FirebaseBackupService.syncSnapshotsFromCloud();
-            await FirebaseBackupService.syncDeletedSessionsFromCloud();
-            console.log(`☁️ Primary synchronization successfully completed for [${expectedTag.toUpperCase()}].`);
-          } catch (syncErr: any) {
-            console.error(`⚠️ Dynamic cloud synchronization failed on startup for [${expectedTag.toUpperCase()}]:`, syncErr.message || syncErr);
-          }
+        // 🚀 CRITICAL CLOUD-SYNC FOR COLD STARTS AND REFRESHES:
+        // Synchronize snapshots, deleted sessions, and active state dynamically from Firestore to keep SQLite perfectly synchronized with Cloud.
+        try {
+          console.log(`☁️ Synchronizing active state, archived snapshots, and deleted sessions from Firestore for [${expectedTag.toUpperCase()}]...`);
+          await FirebaseBackupService.syncActiveStateFromCloud();
+          await FirebaseBackupService.syncSnapshotsFromCloud();
+          await FirebaseBackupService.syncDeletedSessionsFromCloud();
+          console.log(`☁️ Primary synchronization successfully completed for [${expectedTag.toUpperCase()}].`);
+        } catch (syncErr: any) {
+          console.error(`⚠️ Dynamic cloud synchronization failed on startup for [${expectedTag.toUpperCase()}]:`, syncErr.message || syncErr);
         }
 
         // Guarantee that user profiles, default GM, and global settings are ALWAYS fully synced/loaded on startup

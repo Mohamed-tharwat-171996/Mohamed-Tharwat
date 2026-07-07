@@ -266,11 +266,6 @@ export function getFirestoreInstance(): Firestore | null {
 export function detectEnvironment(req?: any): string {
   let env = (process.env.APP_ENV || "").trim().toLowerCase();
   
-  // Use Cloud Run service name as a hint for production environment if not explicitly set
-  if (!env && process.env.K_SERVICE) {
-    env = "production";
-  }
-
   // 1. If explicit request is provided, check host and referer
   if (req) {
     const host = String(req.headers?.host || req.get?.('host') || "").toLowerCase();
@@ -293,11 +288,10 @@ export function detectEnvironment(req?: any): string {
     return "development";
   }
 
-  // If we are here, we couldn't determine the environment strictly.
-  // Default to development to prevent system crash, especially for background tasks.
+  // Strict check: if no valid environment detected, throw error to prevent mixed-data corruption
   const diag = req ? `Host: ${req.headers?.host}, X-Forwarded-Host: ${req.headers?.['x-forwarded-host']}, Referer: ${req.headers?.referer}` : "No Request Context";
-  console.warn(`⚠️ Environment detection fallback to 'development'. Context: ${diag}`);
-  return "development";
+  console.error(`🛑 CRITICAL ERROR: Environment detection failed. ${diag}. Access denied.`);
+  throw new Error("ENVIRONMENT_UNKNOWN");
 }
 
 export function getAppEnv(): string {

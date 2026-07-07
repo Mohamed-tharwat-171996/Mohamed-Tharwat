@@ -41,6 +41,8 @@ export interface AuditItem {
   recheckRequested?: boolean;      // Recheck requested by supervisor
   storekeeperModifications?: { modifiedBy: string; modifiedByName?: string; modifiedAt: string; oldQty: number | null; newQty: number | null }[]; // Storekeeper modifications after supervisor requests re-inventory
   calculatorDetails?: BagCalculatorDetails; // Calculator details for review, deleted on archive
+  varianceReason?: string;
+  varianceNotes?: string;
 }
 
 export interface LoggedInUser {
