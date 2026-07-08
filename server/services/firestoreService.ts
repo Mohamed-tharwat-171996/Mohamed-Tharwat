@@ -284,14 +284,21 @@ export function detectEnvironment(req?: any): string {
   if (env === "production" || env === "preview" || env === "prod") {
     return "production";
   }
-  if (env === "development" || env === "dev" || env === "local") {
-    return "development";
+  
+  // Cloud Run (AI Studio) sets K_SERVICE for deployed environments
+  if (process.env.K_SERVICE) {
+    const envOverride = (process.env.APP_ENV || "production").toLowerCase();
+    return envOverride === "development" ? "development" : "production";
   }
-
-  // Strict check: if no valid environment detected, throw error to prevent mixed-data corruption
-  const diag = req ? `Host: ${req.headers?.host}, X-Forwarded-Host: ${req.headers?.['x-forwarded-host']}, Referer: ${req.headers?.referer}` : "No Request Context";
-  console.error(`🛑 CRITICAL ERROR: Environment detection failed. ${diag}. Access denied.`);
-  throw new Error("ENVIRONMENT_UNKNOWN");
+  // NODE_ENV=production is always set by AI Studio on deployed apps
+  if (process.env.NODE_ENV === "production") {
+    const appEnv = (process.env.APP_ENV || "").trim().toLowerCase();
+    if (appEnv === "development") return "development";
+    console.warn("⚠️ ENV: Defaulting to production via NODE_ENV. Set APP_ENV=production in Secrets.");
+    return "production";
+  }
+  // Safe fallback for local development
+  return "development";
 }
 
 export function getAppEnv(): string {
@@ -444,18 +451,13 @@ export async function _getFirestoreDoc(collectionName: string, docId: string): P
   try {
     const docRef = doc(db, resolved, docId);
     
-    // Create a 12-second timeout to prevent startup/execution hang
+    // Create a 3-second timeout to prevent startup/execution hang
     const getDocPromise = getDoc(docRef);
     getDocPromise.catch(() => {}); // prevent unhandled promise rejection if it fails after timeout
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error("Timeout")), 8000);
+      setTimeout(() => reject(new Error("Timeout")), 3000);
     });
     const docSnap = await Promise.race([getDocPromise, timeoutPromise]);
-    
-    // Track read
-    import("./quotaService").then(({ QuotaService }) => {
-      QuotaService.trackOperation(1, 0, 0, "sys", "System Generic Read").catch(() => {});
-    }).catch(() => {});
 
     // Successful operation: reset consecutive failures counter
     consecutiveFailures = 0;
@@ -512,18 +514,13 @@ export async function _setFirestoreDoc(collectionName: string, docId: string, da
   try {
     const docRef = doc(db, resolved, docId);
     
-    // Create a 12-second timeout to prevent startup/execution hang
+    // Create a 3-second timeout to prevent startup/execution hang
     const setDocPromise = setDoc(docRef, data, { merge: true });
     setDocPromise.catch(() => {}); // prevent unhandled promise rejection if it fails after timeout
     const timeoutPromise = new Promise<void>((_, reject) => {
-      setTimeout(() => reject(new Error("Timeout")), 8000);
+      setTimeout(() => reject(new Error("Timeout")), 3000);
     });
     await Promise.race([setDocPromise, timeoutPromise]);
-    
-    // Track write
-    import("./quotaService").then(({ QuotaService }) => {
-      QuotaService.trackOperation(0, 1, 0, "sys", "System Generic Write").catch(() => {});
-    }).catch(() => {});
 
     // Successful operation: reset consecutive failures counter
     consecutiveFailures = 0;
@@ -567,18 +564,13 @@ export async function _deleteFirestoreDoc(collectionName: string, docId: string)
   try {
     const docRef = doc(db, resolved, docId);
     
-    // Create a 12-second timeout to prevent startup/execution hang
+    // Create a 3-second timeout to prevent startup/execution hang
     const deleteDocPromise = deleteDoc(docRef);
     deleteDocPromise.catch(() => {}); // prevent unhandled promise rejection if it fails after timeout
     const timeoutPromise = new Promise<void>((_, reject) => {
-      setTimeout(() => reject(new Error("Timeout")), 8000);
+      setTimeout(() => reject(new Error("Timeout")), 3000);
     });
     await Promise.race([deleteDocPromise, timeoutPromise]);
-
-    // Track delete
-    import("./quotaService").then(({ QuotaService }) => {
-      QuotaService.trackOperation(0, 0, 1, "sys", "System Generic Delete").catch(() => {});
-    }).catch(() => {});
 
     // Successful operation: reset consecutive failures counter
     consecutiveFailures = 0;
@@ -617,16 +609,9 @@ export async function _getFirestoreCollection(collectionName: string): Promise<a
     const getDocsPromise = getDocs(collRef);
     getDocsPromise.catch(() => {});
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error("Timeout")), 8000);
+      setTimeout(() => reject(new Error("Timeout")), 3000);
     });
     const snap = await Promise.race([getDocsPromise, timeoutPromise]);
-    
-    // Track operation
-    if (snap && !snap.empty) {
-      import("./quotaService").then(({ QuotaService }) => {
-        QuotaService.trackOperation(snap.size, 0, 0, "sys", "System Collection Read").catch(() => {});
-      }).catch(() => {});
-    }
 
     consecutiveFailures = 0;
     if (snap && !snap.empty) {
@@ -669,7 +654,7 @@ export async function _getFirestoreCollection(collectionName: string): Promise<a
 // ==========================================
 
 export async function getFirestoreDoc(collectionName: string, docId: string): Promise<any> {
-  let retries = 2;
+  let retries = 1;
   while (retries >= 0) {
     try {
       return await _getFirestoreDoc(collectionName, docId);
@@ -683,7 +668,7 @@ export async function getFirestoreDoc(collectionName: string, docId: string): Pr
 }
 
 export async function setFirestoreDoc(collectionName: string, docId: string, data: any): Promise<void> {
-  let retries = 2;
+  let retries = 1;
   while (retries >= 0) {
     try {
       return await _setFirestoreDoc(collectionName, docId, data);
@@ -697,7 +682,7 @@ export async function setFirestoreDoc(collectionName: string, docId: string, dat
 }
 
 export async function deleteFirestoreDoc(collectionName: string, docId: string): Promise<void> {
-  let retries = 2;
+  let retries = 1;
   while (retries >= 0) {
     try {
       return await _deleteFirestoreDoc(collectionName, docId);
@@ -711,7 +696,7 @@ export async function deleteFirestoreDoc(collectionName: string, docId: string):
 }
 
 export async function getFirestoreCollection(collectionName: string): Promise<any[]> {
-  let retries = 2;
+  let retries = 1;
   while (retries >= 0) {
     try {
       return await _getFirestoreCollection(collectionName);

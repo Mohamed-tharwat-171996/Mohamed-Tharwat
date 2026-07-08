@@ -70,6 +70,8 @@ export default function StoresManagerDashboard({
     newQty: number | null;
     itemName: string;
     sessionName?: string;
+    sessionId?: string;
+    sessionDate?: number | string | any;
     versionNumber?: number;
   } | null>(null);
 
@@ -198,6 +200,8 @@ export default function StoresManagerDashboard({
           oldQty: mod.oldQty,
           timestamp: timestamp,
           sessionName: item.sessionName,
+          sessionId: item.sessionId,
+          sessionDate: item.sessionDate,
           isStorekeeperModification: true
         };
       });
@@ -580,7 +584,7 @@ export default function StoresManagerDashboard({
       const diff = physical - book;
       
       // Detection of corrections
-      const isSupervisorCorrection = skVal !== null && supervisorVal !== null && skVal !== supervisorVal;
+      const isSupervisorCorrection = false;
       const isManagerCorrection = managerVal !== null && ((supervisorVal !== null && managerVal !== supervisorVal) || (supervisorVal === null && managerVal !== skVal));
       
       const correctionAmount = Math.abs(physical - (skVal || 0));
@@ -629,6 +633,8 @@ export default function StoresManagerDashboard({
             oldQty: displayOld,
             timestamp: mod.modifiedAt || mod.timestamp || Date.now(),
             sessionName: item.sessionName,
+            sessionId: item.sessionId,
+            sessionDate: item.sessionDate,
             versionNumber: itemVersionNum
           };
         }).filter(Boolean);
@@ -665,6 +671,8 @@ export default function StoresManagerDashboard({
               oldQty: skVal,
               timestamp: baseDate.getTime(),
               sessionName: item.sessionName,
+              sessionId: item.sessionId,
+              sessionDate: item.sessionDate,
               versionNumber: itemVersionNum
             });
           }
@@ -706,6 +714,8 @@ export default function StoresManagerDashboard({
               oldQty: preManagerQty,
               timestamp: baseDate.getTime(),
               sessionName: item.sessionName,
+              sessionId: item.sessionId,
+              sessionDate: item.sessionDate,
               versionNumber: itemVersionNum
             });
           }
@@ -913,7 +923,7 @@ export default function StoresManagerDashboard({
       }
 
       // Check for supervisor recount override / correction
-      const isSupervisorCorrection = skVal !== null && supervisorVal !== null && skVal !== supervisorVal;
+      const isSupervisorCorrection = false;
       const managerVal = item.managerQty !== undefined && item.managerQty !== null ? item.managerQty : null;
 
       let sessionModsCount = 0;
@@ -1026,7 +1036,7 @@ export default function StoresManagerDashboard({
       const correctionAmount = isCorrected ? Math.abs((supervisorVal ?? managerVal ?? storekeeperVal) - storekeeperVal) : 0;
 
       // Find supervisor correction
-      const isSupervisorCorrection = storekeeperVal !== null && supervisorVal !== null && storekeeperVal !== supervisorVal;
+      const isSupervisorCorrection = false;
 
       // Find manager corrections
       const session = filteredData.sessions.find(s => s.id === item.sessionId);
@@ -1123,6 +1133,7 @@ export default function StoresManagerDashboard({
         isCorrected,
         correctionAmount,
         sessionName: item.sessionName,
+        sessionId: item.sessionId,
         note: item.note || item.notes || "",
         storekeeperModCount,
         supervisorModCount,
@@ -1274,7 +1285,7 @@ export default function StoresManagerDashboard({
           );
           
           const isManagerCorrection = managerVal !== null && ((supervisorVal !== null && managerVal !== supervisorVal) || (supervisorVal === null && managerVal !== skVal));
-          const isSupervisorCorrection = skVal !== null && supervisorVal !== null && skVal !== supervisorVal;
+          const isSupervisorCorrection = false;
           const storekeeperModCount = getStorekeeperModifications(item).length;
 
           if (isManagerCorrection) sup.totalManagerCorrections += 1;
@@ -1999,6 +2010,8 @@ export default function StoresManagerDashboard({
                                                                   newQty: m.newQty !== undefined ? m.newQty : null,
                                                                   itemName: item.name,
                                                                   sessionName: m.sessionName || h.sessionName,
+                                                                  sessionId: m.sessionId || h.sessionId,
+                                                                  sessionDate: m.sessionDate || h.sessionDate,
                                                                   versionNumber: m.versionNumber || h.versionNumber
                                                                 });
                                                               }}
@@ -3438,16 +3451,32 @@ export default function StoresManagerDashboard({
                   <p className="text-xs font-black text-slate-800 leading-tight">{selectedModDetails.itemName}</p>
                 </div>
                 
-                {selectedModDetails.sessionName && (
-                  <div className="bg-indigo-50/50 p-2.5 rounded-xl border border-indigo-100 flex items-center justify-between">
-                    <div className="space-y-1">
-                      <span className="text-[10px] text-indigo-500 font-bold block">نسخة الجرد:</span>
-                      <p className="text-xs font-black text-indigo-900 leading-tight">{selectedModDetails.sessionName}</p>
+                {(selectedModDetails.sessionName || selectedModDetails.sessionId) && (
+                  <div className="bg-indigo-50/50 p-2.5 rounded-xl border border-indigo-100 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-1">
+                        <span className="text-[10px] text-indigo-500 font-bold block">تاريخ نسخة الجرد:</span>
+                        <p className="text-xs font-black text-indigo-900 leading-tight">
+                          {selectedModDetails.sessionName || (selectedModDetails.sessionDate ? new Date(selectedModDetails.sessionDate instanceof Object && 'seconds' in selectedModDetails.sessionDate ? selectedModDetails.sessionDate.seconds * 1000 : selectedModDetails.sessionDate).toLocaleDateString('ar-EG', {
+                            day: 'numeric',
+                            month: 'long',
+                            year: 'numeric'
+                          }) : "—")}
+                        </p>
+                      </div>
+                      {selectedModDetails.versionNumber && (
+                        <span className="bg-emerald-600 text-white font-black px-2.5 py-1 rounded-lg text-[9px] shadow-3xs shrink-0" title={`نسخة رقم ${selectedModDetails.versionNumber}`}>
+                          {selectedModDetails.versionNumber}
+                        </span>
+                      )}
                     </div>
-                    {selectedModDetails.versionNumber && (
-                      <span className="bg-emerald-600 text-white font-black px-2.5 py-1 rounded-lg text-[9px] shadow-3xs shrink-0" title={`نسخة رقم ${selectedModDetails.versionNumber}`}>
-                        {selectedModDetails.versionNumber}
-                      </span>
+                    {selectedModDetails.sessionId && (
+                      <div className="pt-2 border-t border-indigo-100/50">
+                        <span className="text-[8px] text-indigo-400 font-bold block mb-0.5">الرقم المعرف الوحيد لنسخة الجرد:</span>
+                        <p className="text-[8px] font-mono text-indigo-800/70 break-all bg-white/40 px-1.5 py-1 rounded-md border border-indigo-100/30 select-all" title="اضغط للنسخ">
+                          {selectedModDetails.sessionId}
+                        </p>
+                      </div>
                     )}
                   </div>
                 )}

@@ -3350,7 +3350,7 @@ export default function App() {
 
     const isVarianceEdit = isEditingVariancesOnly;
     const allowedRolesForQuantities = ["general_manager", "system_admin", "program_manager"];
-    const allowedRolesForVariances = ["supervisor", "warehouse_supervisor", "stores_manager", "general_manager", "system_admin", "program_manager"];
+    const allowedRolesForVariances = ["supervisor", "warehouse_supervisor"];
     
     const canSave = isVarianceEdit 
       ? allowedRolesForVariances.includes(user.role)
@@ -3369,7 +3369,7 @@ export default function App() {
       const originalSession = pastSessions.find(s => s.id === inspectSession.id);
       let sessionToSave = { ...inspectSession };
 
-      if (originalSession) {
+      if (originalSession && !isVarianceEdit) {
         const itemChanges: any[] = [];
         sessionToSave.items.forEach(newItem => {
           const oldItem = originalSession.items.find(i => i.itemId === newItem.itemId);
@@ -5693,7 +5693,7 @@ export default function App() {
     (user.role === 'storekeeper' && activeStorekeeperTab === 'none')
   );
 
-  if (user && !isDataLoaded) {
+  if (user && !isDataLoaded && masterItems.length === 0) {
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6" dir="rtl">
         <div className="text-center space-y-4">
@@ -6216,46 +6216,36 @@ export default function App() {
                                     setIsEditingInspectSession(false);
                                     setIsEditingVariancesOnly(false);
                                   }}
-                                  className="flex-1 px-1 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-[9px] sm:text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 cursor-pointer min-w-[70px]"
-                                  title="عرض المقارنات"
+                                  className="flex-1 px-1 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-[8.5px] sm:text-[9.5px] font-bold rounded-lg flex items-center justify-center gap-1 cursor-pointer min-w-[70px]"
+                                  title="عرض مقارنات"
                                 >
-                                  عرض المقارنات
+                                  عرض مقارنات
                                   <Eye className="w-3.5 h-3.5 shrink-0" />
                                 </button>
-                                {['supervisor', 'warehouse_supervisor', 'stores_manager', 'program_manager', 'system_admin'].includes(user?.role || '') && (
-                                  <>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setInspectSession(session);
-                                        setIsEditingInspectSession(false);
-                                        setIsEditingVariancesOnly(true);
-                                      }}
-                                      className="flex-1 px-1 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-[9px] sm:text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 cursor-pointer min-w-[80px]"
-                                      title="توضيح فروقات الأصناف في هذا الجرد المؤرشف"
-                                    >
-                                      توضيح الفروقات
-                                      <ScrollText className="w-3.5 h-3.5 shrink-0" />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleExportVariances(session)}
-                                      className="flex-1 px-1 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[9px] sm:text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 cursor-pointer min-w-[80px]"
-                                      title="تصدير الفروقات المصنفة لملف Excel"
-                                    >
-                                      تصدير الفروقات
-                                      <FileDown className="w-3.5 h-3.5 shrink-0" />
-                                    </button>
-                                  </>
-                                )}
-                                {user?.role === 'program_manager' && (
+                                {['supervisor', 'warehouse_supervisor'].includes(user?.role || '') && (
                                   <button
                                     type="button"
-                                    onClick={() => handleExportCsv(session, `جرد_مؤرشف_${new Date(session.archivedAt || session.updatedAt || session.date).toISOString().split("T")[0]}.csv`)}
-                                    className="px-1 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 text-[9px] sm:text-[10px] font-bold rounded-lg flex items-center justify-center gap-1 cursor-pointer shrink-0"
-                                    title="تحميل التفاصيل"
+                                    onClick={() => {
+                                      setInspectSession(session);
+                                      setIsEditingInspectSession(false);
+                                      setIsEditingVariancesOnly(true);
+                                    }}
+                                    className="flex-1 px-1 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-[8.5px] sm:text-[9.5px] font-bold rounded-lg flex items-center justify-center gap-1 cursor-pointer min-w-[80px]"
+                                    title="توضيح فروقات الأصناف في هذا الجرد المؤرشف"
                                   >
-                                    <FileDown className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                                    توضيح فروقات
+                                    <ScrollText className="w-3.5 h-3.5 shrink-0" />
+                                  </button>
+                                )}
+                                {['supervisor', 'warehouse_supervisor', 'stores_manager', 'program_manager', 'system_admin'].includes(user?.role || '') && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleExportVariances(session)}
+                                    className="flex-1 px-1 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[8.5px] sm:text-[9.5px] font-bold rounded-lg flex items-center justify-center gap-1 cursor-pointer min-w-[80px]"
+                                    title="تصدير فروقات المصنفة لملف Excel"
+                                  >
+                                    تصدير فروقات
+                                    <FileDown className="w-3.5 h-3.5 shrink-0" />
                                   </button>
                                 )}
                                 {user?.role === 'program_manager' && (
@@ -6397,7 +6387,12 @@ export default function App() {
                   )}
 
                   {/* Worksheet list grid */}
-                  {visibleWorksheetItems.length === 0 ? (
+                  {user.role === 'storekeeper' && !isDataLoaded ? (
+                    <div className="p-12 text-center text-slate-400 space-y-3">
+                      <div className="w-8 h-8 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin mx-auto"></div>
+                      <p className="text-xs font-bold text-slate-600">جاري مزامنة الأصناف وجلب المهام المسندة لسيادتكم من السحابة...</p>
+                    </div>
+                  ) : visibleWorksheetItems.length === 0 ? (
                     <div className="p-12 text-center text-slate-400 space-y-2">
                       <Search className="w-8 h-8 mx-auto text-slate-300" />
                       <p className="text-xs font-bold text-slate-500 max-w-sm mx-auto leading-relaxed">
@@ -6545,8 +6540,13 @@ export default function App() {
                                         <div className="flex flex-row gap-1 items-center">
                                           <span>{item.inventoriedByName}</span>
                                           {item.inventoriedAt && (
-                                            <span className="text-[7.5px] text-emerald-600/75 font-mono">
-                                              ({new Date(item.inventoriedAt).toLocaleTimeString('ar-EG', {hour: '2-digit', minute:'2-digit'})})
+                                            <span className="text-[7.5px] text-emerald-600/75 font-mono" dir="ltr">
+                                              ({new Date(item.inventoriedAt).toLocaleString('ar-EG', {
+                                                day: 'numeric',
+                                                month: 'numeric',
+                                                hour: '2-digit',
+                                                minute: '2-digit'
+                                              })})
                                             </span>
                                           )}
                                         </div>
@@ -7886,8 +7886,18 @@ export default function App() {
                                     )}
                                     {item.inventoriedByName && (
                                       <div className="text-[8px] text-emerald-600 font-bold mt-0.5 flex flex-col items-start gap-0.5 leading-none">
-                                        <div className="flex flex-row gap-0.5 items-center">
+                                        <div className="flex flex-row gap-1 items-center flex-wrap">
                                           <span>{item.inventoriedByName}</span>
+                                          {item.inventoriedAt && (
+                                            <span className="text-[7px] text-slate-400 font-mono" dir="ltr">
+                                              ({new Date(item.inventoriedAt).toLocaleString('ar-EG', {
+                                                day: 'numeric',
+                                                month: 'numeric',
+                                                hour: '2-digit',
+                                                minute: '2-digit'
+                                              })})
+                                            </span>
+                                          )}
                                         </div>
                                       </div>
                                     )}
@@ -7954,7 +7964,7 @@ export default function App() {
                                   {/* توضيح الفرق */}
                                   <div className="col-span-2 text-center font-sans">
                                     <div className="flex items-center gap-1 justify-center">
-                                      {(isEditingInspectSession || isEditingVariancesOnly) ? (
+                                      {((isEditingInspectSession || isEditingVariancesOnly) && ['supervisor', 'warehouse_supervisor'].includes(user?.role || '')) ? (
                                         <>
                                           <select
                                             value={item.varianceReason || 'أخرى'}
@@ -8052,11 +8062,16 @@ export default function App() {
                                     )}
                                     {item.inventoriedByName && (
                                       <div className="text-[8px] text-emerald-600 font-bold mt-0.5 flex flex-col items-start gap-0.5 leading-none">
-                                        <div className="flex flex-row gap-0.5 items-center">
+                                        <div className="flex flex-row gap-1 items-center flex-wrap">
                                           <span>{item.inventoriedByName}</span>
                                           {item.inventoriedAt && (
-                                            <span className="text-[8px] text-emerald-600/75 font-mono">
-                                              ({new Date(item.inventoriedAt).toLocaleTimeString('ar-EG', {hour: '2-digit', minute:'2-digit'})})
+                                            <span className="text-[7px] text-slate-400 font-mono" dir="ltr">
+                                              ({new Date(item.inventoriedAt).toLocaleString('ar-EG', {
+                                                day: 'numeric',
+                                                month: 'numeric',
+                                                hour: '2-digit',
+                                                minute: '2-digit'
+                                              })})
                                             </span>
                                           )}
                                         </div>
@@ -8171,7 +8186,7 @@ export default function App() {
                       </button>
                     )}
                     
-                    {['supervisor', 'warehouse_supervisor', 'stores_manager', 'program_manager', 'system_admin'].includes(user?.role || '') && (
+                    {['supervisor', 'warehouse_supervisor'].includes(user?.role || '') && (
                       <button
                         onClick={() => {
                           setIsEditingVariancesOnly(true);
@@ -8179,7 +8194,7 @@ export default function App() {
                         className="px-5 py-2 font-extrabold rounded-xl text-[11px] flex items-center justify-center shadow-xs transition-all bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer"
                         title="تعديل وتوضيح الفروقات والأخطاء للأصناف"
                       >
-                        تعديل الفروقات
+                        تعديل فروقات
                       </button>
                     )}
 
@@ -8189,7 +8204,7 @@ export default function App() {
                       }}
                       className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-extrabold rounded-xl text-[11px] flex items-center justify-center cursor-pointer shadow-xs transition-colors"
                     >
-                      تحميل التقرير
+                      تحميل تقرير
                     </button>
                   </div>
                 )}

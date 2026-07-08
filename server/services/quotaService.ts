@@ -239,7 +239,15 @@ export class QuotaService {
         try {
           await updateDoc(docRef, updateData);
         } catch (err: any) {
-          if (err.code === 'not-found') {
+          const errMsg = String(err.message || "").toLowerCase();
+          const errCode = String(err.code || "").toLowerCase();
+          const isNotFound = errCode === 'not-found' || 
+                             errCode === '5' || 
+                             err.code === 5 ||
+                             errMsg.includes('not-found') || 
+                             errMsg.includes('not_found') || 
+                             errMsg.includes('no document to update');
+          if (isNotFound) {
             const initialData: any = {
               reads,
               writes: writes + 1,
@@ -310,7 +318,15 @@ export class QuotaService {
         updatedAt: Date.now()
       });
     } catch (err: any) {
-      if (err.code === 'not-found') {
+      const errMsg = String(err.message || "").toLowerCase();
+      const errCode = String(err.code || "").toLowerCase();
+      const isNotFound = errCode === 'not-found' || 
+                         errCode === '5' || 
+                         err.code === 5 ||
+                         errMsg.includes('not-found') || 
+                         errMsg.includes('not_found') || 
+                         errMsg.includes('no document to update');
+      if (isNotFound) {
         try {
           await setDoc(docRef, {
             reads: 0,
