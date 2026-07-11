@@ -17,3 +17,12 @@ fix_*.cjs
 wrap_*.cjs
 *_output.txt
 tmp.json
+
+firebase-applet-config.json
+test*.cjs
+trigger_backup.cjs
+force_backup.js
+temp_*.txt
+admin_*.txt
+non_admin_*.txt
+server/server-local-sync-mirror_*.json

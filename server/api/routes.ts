@@ -147,22 +147,12 @@ router.get("/data", AuthService.authenticateJWT, async (req: AuthenticatedReques
     
     // Trigger asynchronous background sync to make sure the local SQLite database matches Firestore
     // and broadcast the fresh state to any active clients immediately on completion.
-    (async () => {
-      try {
-        await FirebaseBackupService.syncActiveStateFromCloud();
-        await FirebaseBackupService.syncSnapshotsFromCloud();
-        await FirebaseBackupService.syncDeletedSessionsFromCloud();
-        
-        // Broadcast the updated state to all connected WS clients
-        const broadcast = (req.app as any).getWssBroadcast ? (req.app as any).getWssBroadcast() : null;
-        if (broadcast) {
-          const freshState = SessionService.getState();
-          broadcast(freshState);
-        }
-      } catch (syncErr: any) {
-        console.warn("Background cloud sync on /api/data bypassed:", syncErr.message || syncErr);
+    const broadcast = (req.app as any).getWssBroadcast ? (req.app as any).getWssBroadcast() : null;
+    FirebaseBackupService.triggerBackgroundSync((freshState) => {
+      if (broadcast) {
+        broadcast(freshState);
       }
-    })();
+    }).catch(e => console.warn("Background sync error:", e));
 
     res.json({
       status: "ok",
@@ -808,6 +798,7 @@ router.post("/deleted/restore", AuthService.authenticateJWT, AuthService.require
 
 router.post("/deleted/permanently-delete", AuthService.authenticateJWT, AuthService.requireRole(["general_manager", "system_admin", "super_admin", "program_manager"]), async (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.body;
+  console.log("permanently-delete called with id:", id);
   if (!id) return res.status(400).json({ error: "Missing required session record id" });
 
   try {

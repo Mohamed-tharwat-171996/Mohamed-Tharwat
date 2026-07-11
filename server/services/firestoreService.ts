@@ -284,6 +284,9 @@ export function detectEnvironment(req?: any): string {
   if (env === "production" || env === "preview" || env === "prod") {
     return "production";
   }
+  if (env === "development" || env === "dev") {
+    return "development";
+  }
   
   // Cloud Run (AI Studio) sets K_SERVICE for deployed environments
   if (process.env.K_SERVICE) {

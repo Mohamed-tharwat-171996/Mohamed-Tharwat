@@ -101,7 +101,7 @@ const getStorekeeperName = (code: number | string | undefined, currentUser?: Log
   const names: { [key: string]: string } = {
     // Role names mapping for display purposes if needed
   };
-  return names[String(code)] || `موظف رقم ${code}`;
+  return names[String(code)] || String(code);
 };
 
 export type UserRole = "general_manager" | "system_admin" | "program_manager" | "warehouse_supervisor" | "storekeeper" | "stores_manager";
@@ -354,7 +354,14 @@ export default function App() {
   // Master database state
   const [masterItems, setMasterItems] = useState<MasterItem[]>([]);
   // Past completed audits archives
-  const [pastSessions, setPastSessions] = useState<AuditSession[]>([]);
+    const [pastSessions, setPastSessions] = useState<AuditSession[]>([]);
+
+  const pushPastSessionUpdate = (updatedSession: AuditSession) => {
+    const updatedPastSessions = pastSessions.map(s => s.id === updatedSession.id ? updatedSession : s);
+    setPastSessions(updatedPastSessions);
+    pushStateToServer({ pastSessions: [updatedSession] }, { isExplicitAction: false });
+  };
+
   // Active/current session that user is filling right now
   const [activeSession, setActiveSession] = useState<AuditSession | null>(null);
 
@@ -412,6 +419,7 @@ export default function App() {
     isFromPastSession: boolean;
     pastSessionId?: string;
   } | null>(null);
+  const [itemToDelete, setItemToDelete] = useState<string | null>(null);
   const [showVarianceNotesModal, setShowVarianceNotesModal] = useState(false);
   const [varianceNotesTempText, setVarianceNotesTempText] = useState("");
   const [isEditingVariancesOnly, setIsEditingVariancesOnly] = useState(false);
@@ -451,7 +459,7 @@ export default function App() {
   const [logsSearchQuery, setLogsSearchQuery] = useState("");
   const [logsActionFilter, setLogsActionFilter] = useState("all");
   const [deletedSessions, setDeletedSessions] = useState<any[]>([]);
-  const [confirmDeleteRecycleId, setConfirmDeleteRecycleId] = useState<number | null>(null);
+  const [confirmDeleteRecycleId, setConfirmDeleteRecycleId] = useState<string | number | null>(null);
   const [assignPopoverItemId, setAssignPopoverItemId] = useState<string | null>(null);
   const [assignSearchTerm, setAssignSearchTerm] = useState<string>("");
   const [isRestoringCloud, setIsRestoringCloud] = useState(false);
@@ -930,6 +938,10 @@ export default function App() {
       if (partialData.activeSession !== undefined) {
         if (partialData.activeSession) {
           localStorage.setItem("inventory_active_session", JSON.stringify(partialData.activeSession));
+          // Mark that we have local-only changes not yet confirmed by server
+          if (user?.role === "storekeeper" || user?.role === "warehouse_supervisor") {
+            localStorage.setItem("inventory_has_local_only_changes", "true");
+          }
         } else {
           localStorage.removeItem("inventory_active_session");
         }
@@ -1010,6 +1022,7 @@ export default function App() {
               throw new Error(errBody.error || errBody.message || "Server error: " + res.statusText);
             }
             console.log("✅ Sync Done: Data pushed to server immediately.");
+            localStorage.removeItem("inventory_has_local_only_changes");
           } catch (err: any) {
              console.warn("⚠️ Explicit Action Network Failed: Queuing data for offline sync...", err);
              await offlineService.queueOperation(syncPayload);
@@ -1067,6 +1080,7 @@ export default function App() {
             }).then(async (res) => {
               if (!res.ok) throw new Error("Server responded with error status");
               console.log("✅ Sync Done: Data pushed to server.");
+              localStorage.removeItem("inventory_has_local_only_changes");
             }).catch(async (err) => {
               console.warn("⚠️ Network Failed: Queuing data for offline sync...", err);
               await offlineService.queueOperation(syncPayload);
@@ -1178,8 +1192,9 @@ export default function App() {
       if (user && !forceUpdate) {
         const hasPending = localStorage.getItem("inventory_has_pending_assignments") === "true";
         const hasUnsaved = localStorage.getItem("inventory_has_unsaved_changes") === "true";
+        const hasLocalOnly = localStorage.getItem("inventory_has_local_only_changes") === "true";
         
-        if (hasUnsaved || hasPending) {
+        if (hasUnsaved || hasPending || hasLocalOnly) {
           console.log("🛡️ Sync Shield Activated: Local active draft worksheet is protected from background merges.");
           setIsDataLoaded(true);
           return;
@@ -1203,7 +1218,7 @@ export default function App() {
 
       // BULLETPROOF PROTECTION GATES:
       // A server payload is empty or uninitialized if it contains no products, no active session, and no past sessions.
-      if (isServerPayloadEmpty && localHasData) {
+      if (isServerPayloadEmpty && localHasData && !forceUpdate) {
         console.warn("🛡️ System Shield Activated: Stopped empty server payload from overwriting local data. Healing server...");
         const token = localStorage.getItem("inventory_jwt_token");
         if (token) {
@@ -1225,7 +1240,7 @@ export default function App() {
       // Conflict Resolution:
       // Case 1: Server is completely blank/new (e.g. wiped SQLite), but we have local data.
       // We push our local state to restore the server.
-      if (!isFreshDevice && localHasData && serverTime === 0) {
+      if (!isFreshDevice && localHasData && serverTime === 0 && !forceUpdate) {
         console.log(`Server is blank. Restoring from local state...`);
         // 🛡️ ACCIDENTAL WIPE SHIELD: If localActive is null, DO NOT push activeSession: null to prevent wiping active session on server!
         const activeToPush = localActive ? { ...localActive, updatedAt: Date.now() } : undefined;
@@ -1247,7 +1262,7 @@ export default function App() {
 
       if (sMasterClean && JSON.stringify(masterItems) !== JSON.stringify(sMasterClean)) {
         const isServerEmptyUninitialized = sMasterClean.length === 0 && serverTime === 0;
-        if (!isServerEmptyUninitialized) {
+        if (!isServerEmptyUninitialized || forceUpdate) {
           setMasterItems(sMasterClean);
           localStorage.setItem("inventory_master_items", JSON.stringify(sMasterClean));
         }
@@ -1317,12 +1332,12 @@ export default function App() {
       } else {
         // Protect local active session from being overwritten with null.
         // We should ONLY clear the active session if it is explicitly archived/found in pastSessions or deletedSessions on server.
-        // Bypassed if server has NO master catalog items (a clean database reset/wipeout - "تصفير")
+        // Bypassed if server has NO master catalog items (a clean database reset/wipeout - "تصفير") or if forceUpdate is true.
         const isActuallyArchived = localActive && Array.isArray(sPast) && sPast.some((pSess: any) => String(pSess.id) === String(localActive.id));
         const isActuallyDeleted = localActive && Array.isArray(sDeletedClean) && sDeletedClean.some((delSess: any) => String(delSess.sessionId) === String(localActive.id));
         const isCatalogCompletelyCleared = !sMasterClean || sMasterClean.length === 0;
         
-        if (isActuallyArchived || isActuallyDeleted || isCatalogCompletelyCleared) {
+        if (isActuallyArchived || isActuallyDeleted || isCatalogCompletelyCleared || forceUpdate) {
           setActiveSession(null);
           localStorage.removeItem("inventory_active_session");
         } else {
@@ -1511,7 +1526,8 @@ export default function App() {
       const res = await fetch("/api/deleted", {
         headers: {
           "Authorization": `Bearer ${token}`
-        }
+        },
+        cache: 'no-store'
       });
 
       const contentType = res.headers.get("content-type");
@@ -1530,15 +1546,18 @@ export default function App() {
   };
 
   // Restore deleted session (System Admin only)
-  const handleRestoreDeletedSessionValue = async (id: number) => {
+  const handleRestoreDeletedSessionValue = async (id: string | number) => {
     // Check if the session we are trying to restore was an active session and we already have an active session
-    const targetSession = deletedSessions.find((s) => s.id === id);
+    const targetSession = deletedSessions.find((s) => s.sessionId === id || s.id === id);
     if (targetSession && targetSession.sessionData && targetSession.sessionData.type !== "archived") {
       if (activeSession && activeSession.items && activeSession.items.length > 0) {
         showToast("❌ لا يمكن الاسترجاع: يوجد حالياً جلسة جرد نشطة في ورقة الجرد! يجب إنهاؤها أو حذفها بالكامل أولاً.", "error");
         return;
       }
     }
+
+    // Instantly remove from local UI list for smooth transitions
+    setDeletedSessions(prev => prev.filter(item => item.sessionId !== id && item.id !== id));
 
     try {
       const token = localStorage.getItem("inventory_jwt_token");
@@ -1559,13 +1578,18 @@ export default function App() {
         await performCloudSync(true, true);
       } else {
         showToast(result.error || "فشل استرجاع الجلسة.", "error");
+        await fetchDeletedSessions(); // reload list on error
       }
     } catch (err) {
       showToast("حدث خطأ أثناء الاتصال بالسيرفر للمزامنة.", "error");
+      await fetchDeletedSessions();
     }
   };
 
-  const handlePermanentDeleteSession = async (id: number) => {
+  const handlePermanentDeleteSession = async (id: string | number) => {
+    // Instantly remove from local UI list for absolute responsiveness
+    setDeletedSessions(prev => prev.filter(item => item.sessionId !== id && item.id !== id));
+
     try {
       const token = localStorage.getItem("inventory_jwt_token");
       if (!token) return;
@@ -1583,9 +1607,11 @@ export default function App() {
         await fetchDeletedSessions();
       } else {
         showToast(result.error || "فشل الحذف النهائي.", "error");
+        await fetchDeletedSessions(); // reload list on error
       }
     } catch (err) {
       showToast("حدث خطأ أثناء الاتصال بالسيرفر.", "error");
+      await fetchDeletedSessions();
     }
   };
 
@@ -2793,7 +2819,7 @@ export default function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${localStorage.getItem("inventory_token")}`
+          "Authorization": `Bearer ${localStorage.getItem("inventory_jwt_token")}`
         }
       });
       const data = await res.json();
@@ -3349,7 +3375,7 @@ export default function App() {
     if (!user) return;
 
     const isVarianceEdit = isEditingVariancesOnly;
-    const allowedRolesForQuantities = ["general_manager", "system_admin", "program_manager"];
+    const allowedRolesForQuantities = ["general_manager", "system_admin", "program_manager", "supervisor", "warehouse_supervisor"];
     const allowedRolesForVariances = ["supervisor", "warehouse_supervisor"];
     
     const canSave = isVarianceEdit 
@@ -3359,7 +3385,7 @@ export default function App() {
     if (!canSave) {
       showToast(isVarianceEdit 
         ? "عذراً، تعديل الفروقات مخصص للمشرفين والمسؤولين فقط!" 
-        : "عذراً، التعديل مخصص فقط لمسؤول البرنامج!", 
+        : "عذراً، التعديل مخصص فقط لمسؤولي البرنامج والمشرفين!", 
         "error"
       );
       return;
@@ -4808,15 +4834,6 @@ export default function App() {
                                               {cloudBackupMetadata.hasActiveSession ? "جلسات نشطة" : "لا يوجد"}
                                             </span>
                                           </div>
-                                          {cloudBackupMetadata.hasActiveSession && user?.role && ["program_manager", "general_manager", "system_admin", "super_admin"].includes(user.role) && (
-                                            <button
-                                              type="button"
-                                              onClick={handleForceClearActiveSession}
-                                              className="w-full mt-1.5 font-bold text-[8.5px] py-1 px-1.5 border border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100 rounded-lg cursor-pointer transition-all active:scale-95 text-center focus:outline-none"
-                                            >
-                                              تصفير الجلسة 🗑️
-                                            </button>
-                                          )}
                                         </div>
 
                                         <div className="bg-white p-2.5 rounded-xl border border-slate-150 space-y-1">
@@ -5059,12 +5076,12 @@ export default function App() {
                                 </div>
 
                                 <div className="flex flex-row items-center gap-2">
-                                  {confirmDeleteRecycleId === item.id ? (
+                                  {confirmDeleteRecycleId === item.sessionId ? (
                                     <div className="flex items-center gap-1 bg-rose-50 p-1 rounded-xl">
                                       <button
                                         type="button"
                                         onClick={() => {
-                                          handlePermanentDeleteSession(item.id);
+                                          handlePermanentDeleteSession(item.sessionId);
                                           setConfirmDeleteRecycleId(null);
                                         }}
                                         className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg shadow-xs font-bold text-[9px] flex items-center gap-1.5 transition-all text-center cursor-pointer"
@@ -5082,7 +5099,7 @@ export default function App() {
                                   ) : (
                                     <button
                                       type="button"
-                                      onClick={() => setConfirmDeleteRecycleId(item.id)}
+                                      onClick={() => setConfirmDeleteRecycleId(item.sessionId)}
                                       className="px-3 py-2 bg-rose-100 hover:bg-rose-200 text-rose-700 rounded-xl shadow-xs font-bold text-[9.5px] flex items-center gap-1.5 transition-all text-center self-center cursor-pointer"
                                       title="حذف نهائي"
                                     >
@@ -5092,7 +5109,7 @@ export default function App() {
 
                                   <button
                                     type="button"
-                                    onClick={() => handleRestoreDeletedSessionValue(item.id)}
+                                    onClick={() => handleRestoreDeletedSessionValue(item.sessionId)}
                                     className="px-4 py-2 bg-purple-900 hover:bg-purple-950 text-white rounded-xl shadow-xs font-bold text-[9.5px] flex items-center gap-1.5 transition-all text-center self-center cursor-pointer"
                                   >
                                     <RotateCcw className="w-3.5 h-3.5" /> استرجاع الجلسة
@@ -5572,11 +5589,18 @@ export default function App() {
         </AnimatePresence>
 
         <DeletionReasonModal />
+        <DeleteItemConfirmModal />
 
         {isShowingMirror && user && ["general_manager", "system_admin", "super_admin", "program_manager"].includes(user.role) && (
           <MasterInventoryMirror 
             items={masterItems} 
             userCanClear={["general_manager", "system_admin", "super_admin", "program_manager"].includes(user.role)}
+            localActiveSession={activeSession}
+            onImportActiveSession={(session) => {
+              setActiveSession(session);
+              localStorage.setItem("inventory_active_session", JSON.stringify(session));
+              fetchStateFromServer(true);
+            }}
             onClose={() => setIsShowingMirror(false)} 
             onSync={() => {
               fetchCloudBackupInfo(true);
@@ -5587,6 +5611,47 @@ export default function App() {
             }}
           />
         )}
+      </div>
+    );
+  }
+
+  // Item Deletion Confirmation Modal component
+  function DeleteItemConfirmModal() {
+    if (!itemToDelete) return null;
+    
+    const item = activeSession?.items.find(i => i.itemId === itemToDelete);
+
+    return (
+      <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn" dir="rtl">
+        <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm border border-slate-200 p-6 animate-scaleIn">
+          <div className="flex justify-center mb-4 text-red-500">
+             <TriangleAlert className="w-12 h-12" />
+          </div>
+          <h3 className="text-xl font-bold text-slate-800 text-center mb-2">تأكيد الحذف</h3>
+          <p className="text-slate-600 text-center mb-6">
+            هل أنت متأكد من حذف الصنف 
+            <span className="text-green-600 font-bold"> "{item?.itemName || 'غير معروف'}" </span> 
+            من ورقة الجرد؟ 
+            <span className="text-red-500 font-medium"> هذا الإجراء لا يمكن التراجع عنه.</span>
+          </p>
+          <div className="flex gap-3">
+            <button
+              onClick={() => {
+                if (itemToDelete) handleDeleteWorksheetItem(itemToDelete);
+                setItemToDelete(null);
+              }}
+              className="flex-1 bg-red-600 text-white font-semibold py-3 rounded-xl hover:bg-red-700 transition"
+            >
+              نعم، حذف
+            </button>
+            <button
+              onClick={() => setItemToDelete(null)}
+              className="flex-1 bg-slate-100 text-slate-700 font-semibold py-3 rounded-xl hover:bg-slate-200 transition"
+            >
+              إلغاء
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -6443,7 +6508,7 @@ export default function App() {
                               {['warehouse_supervisor', 'system_admin', 'supervisor'].includes(user?.role || '') && (
                                 <col className="w-[72px]" />
                               )}
-                              {['warehouse_supervisor', 'supervisor', 'program_manager'].includes(user?.role || '') && (
+                              {['warehouse_supervisor', 'supervisor'].includes(user?.role || '') && (
                                 <col className="w-36" />
                               )}
                               {user?.role === 'program_manager' && <col className="w-6" />}
@@ -6469,7 +6534,8 @@ export default function App() {
                                 {(user?.role === 'warehouse_supervisor' || user?.role === 'system_admin' || user?.role === 'supervisor') && (
                                   <th className="py-1 px-0.5 bg-slate-100 text-slate-700 font-bold border-b border-slate-200 text-center whitespace-nowrap text-[8.5px]">إعادة</th>
                                 )}
-                                {['warehouse_supervisor', 'supervisor', 'program_manager'].includes(user?.role || '') && (
+                                
+{['warehouse_supervisor', 'supervisor'].includes(user?.role || '') && (
                                   <th className="py-1 px-0.5 bg-slate-100 text-slate-700 font-bold border-b border-slate-200 text-center whitespace-nowrap text-[9.5px]">توضيح الفرق</th>
                                 )}
                                 {user?.role === 'program_manager' && (
@@ -6528,13 +6594,29 @@ export default function App() {
                                         ⚠️ مطلوب إعادة الجرد 🔄
                                       </span>
                                     )}
-                                    {(item.storekeeperModifications && item.storekeeperModifications.length > 0) && (
-                                      <div className="flex flex-wrap items-center gap-1 mt-1">
-                                        <span className="text-[9px] bg-emerald-100 text-emerald-800 border border-emerald-200 font-extrabold px-1.5 py-0.5 rounded-md flex items-center gap-1 shadow-3xs" title="عدد مرات إعادة الجرد">
-                                          🔄 ({item.storekeeperModifications.length})
-                                        </span>
-                                      </div>
-                                    )}
+                                    {(() => {
+                                      const skModCount = item.storekeeperModifications?.length || 0;
+                                      const sessionModsCount = (activeSession?.modifications || []).filter((m: any) => 
+                                        m.itemChanges?.some((c: any) => c.itemId === item.itemId)
+                                      ).length;
+                                      
+                                      const skQty = (item.storekeeperQty !== undefined && item.storekeeperQty !== null) ? item.storekeeperQty : null;
+                                      const supQty = (item.supervisorQty !== undefined && item.supervisorQty !== null) ? item.supervisorQty : null;
+                                      const manQty = (item.managerQty !== undefined && item.managerQty !== null) ? item.managerQty : null;
+                                      
+                                      const supCorrection = (supQty !== null && skQty !== null && supQty !== skQty) ? 1 : 0;
+                                      const manCorrection = (manQty !== null && supQty !== null && manQty !== supQty) ? 1 : 0;
+                                      
+                                      const totalItemMods = skModCount + sessionModsCount + supCorrection + manCorrection;
+                                      
+                                      return totalItemMods > 0 && (
+                                        <div className="flex flex-wrap items-center gap-1 mt-1">
+                                          <span className="text-[9px] bg-emerald-100 text-emerald-800 border border-emerald-200 font-extrabold px-1.5 py-0.5 rounded-md flex items-center gap-1 shadow-3xs" title="إجمالي عدد التعديلات على هذا الصنف">
+                                            🔄 ({totalItemMods})
+                                          </span>
+                                        </div>
+                                      );
+                                    })()}
                                     {item.inventoriedByName && (
                                       <div className="text-[8px] text-emerald-600 font-bold mt-0.5 flex flex-col items-start gap-0 leading-none">
                                         <div className="flex flex-row gap-1 items-center">
@@ -6718,7 +6800,8 @@ export default function App() {
                                                             {isSelected && <div className="w-3 h-3 bg-teal-700 rounded-full animate-fadeIn"></div>}
                                                           </div>
                                                           <span className={`text-[16px] sm:text-[17px] ${isSelected ? 'font-bold text-slate-900' : 'text-slate-800'}`}>
-                                                            {u.name} (كود: {u.code})
+                                                            <span className="font-mono text-slate-400 ml-2 text-[12px] shrink-0">[{u.code}]</span>
+                                                            {u.name}
                                                           </span>
                                                         </button>
                                                       );
@@ -6795,10 +6878,7 @@ export default function App() {
                                         onChange={(e) => handlePhysicalQtyChange(item.itemId, e.target.value)}
                                         onBlur={() => {
                                           if (activeSession) {
-                                            const isSupervisor = user?.role === "warehouse_supervisor" || user?.role === "supervisor";
-                                            if (!isSupervisor) {
-                                              pushStateToServer({ activeSession }, { isExplicitAction: true });
-                                            }
+                                            pushStateToServer({ activeSession }, { isExplicitAction: true });
                                           }
                                         }}
                                         onKeyDown={(e) => handleKeyDown(e, item.itemId, idx, visibleWorksheetItems)}
@@ -6900,7 +6980,8 @@ export default function App() {
                                         )}
                                       </td>
                                     )}
-                                    {['warehouse_supervisor', 'supervisor', 'program_manager'].includes(user?.role || '') && (
+                                    
+{['warehouse_supervisor', 'supervisor'].includes(user?.role || '') && (
                                       <td className="py-1 px-1 border-b border-slate-100 text-center">
                                         <div className="flex items-center gap-1 justify-center">
                                           <select
@@ -6963,7 +7044,7 @@ export default function App() {
                                       <td className="py-1 px-1.5 text-center border-b border-slate-100">
                                         <button
                                           type="button"
-                                          onClick={() => handleDeleteWorksheetItem(item.itemId)}
+                                          onClick={() => setItemToDelete(item.itemId)}
                                           className="p-1.5 text-red-600 hover:bg-red-50 hover:text-red-700 rounded-lg transition-all cursor-pointer inline-flex items-center justify-center"
                                           title="حذف الصنف من الجلسة"
                                         >
@@ -7672,6 +7753,9 @@ export default function App() {
                   {(() => {
                     const postArchiveMods = inspectSession.modifications || [];
                     const storekeeperMods: any[] = [];
+                    const supervisorCorrections: any[] = [];
+                    const managerCorrections: any[] = [];
+                    
                     (inspectSession.items || []).forEach((item) => {
                       if (item.storekeeperModifications && item.storekeeperModifications.length > 0) {
                         item.storekeeperModifications.forEach((mod: any) => {
@@ -7682,9 +7766,35 @@ export default function App() {
                           });
                         });
                       }
+                      
+                      // Pre-archive supervisor corrections
+                      const skQty = (item.storekeeperQty !== undefined && item.storekeeperQty !== null) ? item.storekeeperQty : null;
+                      const supQty = (item.supervisorQty !== undefined && item.supervisorQty !== null) ? item.supervisorQty : null;
+                      const manQty = (item.managerQty !== undefined && item.managerQty !== null) ? item.managerQty : null;
+                      
+                      if (supQty !== null && skQty !== null && supQty !== skQty) {
+                        supervisorCorrections.push({
+                          itemName: item.itemName,
+                          itemId: item.itemId,
+                          oldQty: skQty,
+                          newQty: supQty,
+                          modifiedBy: getStorekeeperName(inspectSession.supervisorApprovedBy || "supervisor", user)
+                        });
+                      }
+                      
+                      if (manQty !== null && supQty !== null && manQty !== supQty) {
+                        managerCorrections.push({
+                          itemName: item.itemName,
+                          itemId: item.itemId,
+                          oldQty: supQty,
+                          newQty: manQty,
+                          modifiedBy: getStorekeeperName(inspectSession.archivedBy || "program_manager", user)
+                        });
+                      }
                     });
+                    
                     storekeeperMods.sort((a, b) => new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime());
-                    const totalModsCount = postArchiveMods.length + storekeeperMods.length;
+                    const totalModsCount = postArchiveMods.length + storekeeperMods.length + supervisorCorrections.length + managerCorrections.length;
 
                     return ['program_manager', 'stores_manager', 'warehouse_supervisor', 'supervisor', 'system_admin', 'general_manager'].includes(user?.role || '') && (
                       <button
@@ -7717,6 +7827,9 @@ export default function App() {
               {(() => {
                 const postArchiveMods = inspectSession.modifications || [];
                 const storekeeperMods: any[] = [];
+                const supervisorCorrections: any[] = [];
+                const managerCorrections: any[] = [];
+                
                 (inspectSession.items || []).forEach((item) => {
                   if (item.storekeeperModifications && item.storekeeperModifications.length > 0) {
                     item.storekeeperModifications.forEach((mod: any) => {
@@ -7727,9 +7840,57 @@ export default function App() {
                       });
                     });
                   }
+                  
+                  // Backtrack post-archive modifications to get values at the time of archive
+                  const itemPostArchiveMods = (inspectSession.modifications || [])
+                    .filter((m: any) => m.itemChanges?.some((c: any) => c.itemId === item.itemId));
+
+                  let archivedManQty = (item.managerQty !== undefined && item.managerQty !== null) ? item.managerQty : null;
+                  let archivedSupQty = (item.supervisorQty !== undefined && item.supervisorQty !== null) ? item.supervisorQty : null;
+                  let archivedSkQty = (item.storekeeperQty !== undefined && item.storekeeperQty !== null) ? item.storekeeperQty : null;
+
+                  if (itemPostArchiveMods.length > 0) {
+                    // The first modification records the state as it was at the moment of archiving
+                    const firstChange = itemPostArchiveMods[0].itemChanges?.find((c: any) => c.itemId === item.itemId);
+                    if (firstChange) {
+                      const archivedPhysicalQty = firstChange.oldQty;
+                      // Backtrack the final role quantity that was active at archive
+                      if (archivedManQty !== null) archivedManQty = archivedPhysicalQty;
+                      else if (archivedSupQty !== null) archivedSupQty = archivedPhysicalQty;
+                      else if (archivedSkQty !== null) archivedSkQty = archivedPhysicalQty;
+                    }
+                  }
+                  
+                  // Pre-archive supervisor/manager corrections
+                  const skQty = archivedSkQty;
+                  const supQty = archivedSupQty;
+                  const manQty = archivedManQty;
+                  
+                  if (supQty !== null && skQty !== null && supQty !== skQty) {
+                    supervisorCorrections.push({
+                      itemName: item.itemName,
+                      itemId: item.itemId,
+                      oldQty: skQty,
+                      newQty: supQty,
+                      modifiedBy: getStorekeeperName(inspectSession.supervisorApprovedBy || "supervisor", user),
+                      modifiedAt: inspectSession.supervisorApprovedAt || inspectSession.date
+                    });
+                  }
+                  
+                  if (manQty !== null && supQty !== null && manQty !== supQty) {
+                    managerCorrections.push({
+                      itemName: item.itemName,
+                      itemId: item.itemId,
+                      oldQty: supQty,
+                      newQty: manQty,
+                      modifiedBy: getStorekeeperName(inspectSession.archivedBy || "program_manager", user),
+                      modifiedAt: inspectSession.archivedAt || inspectSession.updatedAt || inspectSession.date
+                    });
+                  }
                 });
+                
                 storekeeperMods.sort((a, b) => new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime());
-                const totalModsCount = postArchiveMods.length + storekeeperMods.length;
+                const totalModsCount = postArchiveMods.length + storekeeperMods.length + supervisorCorrections.length + managerCorrections.length;
 
                 return showInspectModifications && totalModsCount > 0 && (
                   <div className="space-y-3">
@@ -7743,17 +7904,19 @@ export default function App() {
                         <div className="max-h-60 overflow-y-auto space-y-2">
                           {storekeeperMods.map((mod, index) => (
                             <div key={`sk-mod-${index}`} className="bg-white p-2.5 rounded-lg border border-emerald-100/50 shadow-3xs text-[10px]">
-                              <div className="flex justify-between items-center mb-1.5">
-                                <span className="font-bold text-emerald-700">أمين المستودع: {mod.modifiedByName || `موظف رقم ${mod.modifiedBy}`}</span>
-                                <span className="text-[9px] text-slate-500 font-mono">{new Date(mod.modifiedAt).toLocaleString("ar-EG")}</span>
+                              <div className="flex justify-between items-center mb-1.5 flex-wrap gap-2 border-b border-slate-50 pb-1.5">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-bold text-emerald-700">{getStorekeeperName(mod.modifiedBy, user)}</span>
+                                  <span className="font-mono text-[9px] bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100 flex items-center gap-1">
+                                    <span className="line-through text-slate-400">{mod.oldQty === null || mod.oldQty === undefined ? "—" : mod.oldQty}</span>
+                                    <span className="text-emerald-600 font-bold">➜</span>
+                                    <span className="font-bold text-slate-800">{mod.newQty === null || mod.newQty === undefined ? "—" : mod.newQty}</span>
+                                  </span>
+                                </div>
+                                <span className="text-[9px] text-slate-400 font-mono">{new Date(mod.modifiedAt).toLocaleString("ar-EG", { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'numeric' })}</span>
                               </div>
-                              <div className="flex justify-between items-center text-[9px] bg-slate-50 p-1.5 rounded">
-                                <span className="font-bold text-slate-700 truncate max-w-[60%]">{mod.itemName} ({mod.itemId})</span>
-                                <span className="font-mono text-slate-500">
-                                  <span className="line-through mx-1">{mod.oldQty === null || mod.oldQty === undefined ? "—" : mod.oldQty}</span>
-                                  <span className="text-emerald-600 font-bold mx-1">➜</span>
-                                  <span className="font-bold text-slate-800">{mod.newQty === null || mod.newQty === undefined ? "—" : mod.newQty}</span>
-                                </span>
+                              <div className="text-[10px] text-right font-medium text-slate-600 pt-0.5">
+                                {mod.itemName}
                               </div>
                             </div>
                           ))}
@@ -7761,7 +7924,37 @@ export default function App() {
                       </div>
                     )}
 
-                    {/* 2. Manager/Supervisor modifications (after archiving) */}
+                    {/* 2. Supervisor/Manager corrections (during auditing) */}
+                    {(supervisorCorrections.length > 0 || managerCorrections.length > 0) && (
+                      <div className="bg-amber-50/40 border border-amber-150 rounded-xl p-3 space-y-2 text-right" dir="rtl">
+                        <h4 className="text-[11px] font-bold text-amber-900 mb-1 border-b border-amber-100 pb-1.5 flex items-center gap-1.5 font-sans">
+                          <Clock className="w-3.5 h-3.5 text-amber-600" />
+                          سجل تصحيحات وتعديلات المشرفين ومسؤول البرنامج (أثناء الجرد)
+                        </h4>
+                        <div className="max-h-60 overflow-y-auto space-y-2">
+                          {[...supervisorCorrections, ...managerCorrections].map((mod, index) => (
+                            <div key={`sup-man-mod-${index}`} className="bg-white p-2.5 rounded-lg border border-amber-100/50 shadow-3xs text-[10px]">
+                              <div className="flex justify-between items-center mb-1.5 flex-wrap gap-2 border-b border-slate-50 pb-1.5">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-bold text-amber-700">{mod.modifiedBy}</span>
+                                  <span className="font-mono text-[9px] bg-amber-50 px-1.5 py-0.5 rounded border border-amber-100 flex items-center gap-1">
+                                    <span className="line-through text-slate-400">{mod.oldQty === null ? "—" : mod.oldQty}</span>
+                                    <span className="text-amber-600 font-bold">➜</span>
+                                    <span className="font-bold text-slate-800">{mod.newQty === null ? "—" : mod.newQty}</span>
+                                  </span>
+                                </div>
+                                <span className="text-[9px] text-slate-400 font-mono">{new Date(mod.modifiedAt).toLocaleString("ar-EG", { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'numeric' })}</span>
+                              </div>
+                              <div className="text-[10px] text-right font-medium text-slate-600 pt-0.5">
+                                {mod.itemName}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 3. Manager/Supervisor modifications (after archiving) */}
                     {postArchiveMods.length > 0 && (
                       <div className="bg-indigo-50/50 border border-indigo-100 rounded-xl p-3 space-y-2 text-right" dir="rtl">
                         <h4 className="text-[11px] font-bold text-indigo-900 mb-1 border-b border-indigo-100 pb-1.5 flex items-center gap-1.5 font-sans">
@@ -7769,24 +7962,26 @@ export default function App() {
                           سجل تعديلات الجرد بعد الأرشفة (بواسطة الإدارة والمسؤولين)
                         </h4>
                         <div className="max-h-60 overflow-y-auto space-y-2">
-                          {postArchiveMods.map((mod: any, index: number) => (
-                            <div key={`post-mod-${index}`} className="bg-white p-2.5 rounded-lg border border-indigo-100/50 shadow-sm text-[10px]">
-                              <div className="flex justify-between items-center mb-1.5">
-                                <span className="font-bold text-indigo-700">قام بالتعديل: {mod.modifiedBy}</span>
-                                <span className="text-[9px] text-slate-500 font-mono">{new Date(mod.modifiedAt).toLocaleString("ar-EG")}</span>
-                              </div>
-                              <div className="space-y-1">
-                                {mod.itemChanges?.map((change: any, idx: number) => (
-                                  <div key={idx} className="flex justify-between items-center text-[9px] bg-slate-50 p-1 rounded">
-                                    <span className="font-bold text-slate-700 truncate max-w-[60%]">{change.itemName}</span>
-                                    <span className="font-mono text-slate-500">
-                                      <span className="line-through mx-1">{change.oldQty === null ? "—" : change.oldQty}</span>
-                                      <span className="text-emerald-600 font-bold mx-1">➜</span>
-                                      <span className="font-bold text-slate-800">{change.newQty === null ? "—" : change.newQty}</span>
-                                    </span>
+                          {postArchiveMods.map((mod: any, modIdx: number) => (
+                            <div key={`post-mod-group-${modIdx}`} className="space-y-2">
+                              {mod.itemChanges?.map((change: any, changeIdx: number) => (
+                                <div key={`post-mod-${modIdx}-${changeIdx}`} className="bg-white p-2.5 rounded-lg border border-indigo-100/50 shadow-3xs text-[10px]">
+                                  <div className="flex justify-between items-center mb-1.5 flex-wrap gap-2 border-b border-slate-50 pb-1.5">
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-bold text-indigo-700">{mod.modifiedBy}</span>
+                                      <span className="font-mono text-[9px] bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100 flex items-center gap-1">
+                                        <span className="line-through text-slate-400">{change.oldQty === null ? "—" : change.oldQty}</span>
+                                        <span className="text-indigo-600 font-bold">➜</span>
+                                        <span className="font-bold text-slate-800">{change.newQty === null ? "—" : change.newQty}</span>
+                                      </span>
+                                    </div>
+                                    <span className="text-[9px] text-slate-400 font-mono">{new Date(mod.modifiedAt).toLocaleString("ar-EG", { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'numeric' })}</span>
                                   </div>
-                                ))}
-                              </div>
+                                  <div className="text-[10px] text-right font-medium text-slate-600 pt-0.5">
+                                    {change.itemName}
+                                  </div>
+                                </div>
+                              ))}
                             </div>
                           ))}
                         </div>
@@ -7847,7 +8042,8 @@ export default function App() {
                       </div>
                       {/* Grid Columns Table Header for perfect alignment and zero overflow */}
                       <div className="grid grid-cols-12 gap-1 bg-slate-50 border-b border-slate-100 px-2 py-1.5 text-center text-[9px] font-extrabold text-slate-500 font-sans" dir="rtl">
-                        {['warehouse_supervisor', 'supervisor', 'program_manager'].includes(user?.role || '') ? (
+                        
+{['warehouse_supervisor', 'supervisor', 'program_manager', 'stores_manager'].includes(user?.role || '') ? (
                           <>
                             <div className="col-span-3 text-right pr-1">اسم الصنف</div>
                             <div className="col-span-2">الرصيد الدفتري</div>
@@ -7873,17 +8069,34 @@ export default function App() {
 
                           return (
                             <div key={item.itemId} className="px-2 py-2 grid grid-cols-12 gap-1 items-center text-center text-[10px] hover:bg-slate-50 text-slate-700 transition-colors" dir="rtl">
-                              {['warehouse_supervisor', 'supervisor', 'program_manager'].includes(user?.role || '') ? (
+                              
+{['warehouse_supervisor', 'supervisor', 'program_manager', 'stores_manager'].includes(user?.role || '') ? (
                                 <>
                                   <div className="col-span-3 text-right pr-1">
                                     <span className="font-bold text-slate-800 block text-[10px] break-words leading-tight" title={item.itemName}>{item.itemName}</span>
-                                    {item.storekeeperModifications && item.storekeeperModifications.length > 0 && (
-                                      <div className="mt-1 flex gap-1 items-start flex-wrap">
-                                        <span className="text-[8px] bg-emerald-100 text-emerald-800 border border-emerald-200 font-extrabold px-1 py-0.5 rounded-sm flex items-center gap-1 shadow-3xs" title="عدد مرات إعادة الجرد">
-                                          🔄 ({item.storekeeperModifications.length})
-                                        </span>
-                                      </div>
-                                    )}
+                                    {(() => {
+                                      const skModCount = item.storekeeperModifications?.length || 0;
+                                      const postArchiveModsCount = (inspectSession?.modifications || []).filter((m: any) => 
+                                        m.itemChanges?.some((c: any) => c.itemId === item.itemId)
+                                      ).length;
+                                      
+                                      const skQty = (item.storekeeperQty !== undefined && item.storekeeperQty !== null) ? item.storekeeperQty : null;
+                                      const supQty = (item.supervisorQty !== undefined && item.supervisorQty !== null) ? item.supervisorQty : null;
+                                      const manQty = (item.managerQty !== undefined && item.managerQty !== null) ? item.managerQty : null;
+                                      
+                                      const supCorrection = (supQty !== null && skQty !== null && supQty !== skQty) ? 1 : 0;
+                                      const manCorrection = (manQty !== null && supQty !== null && manQty !== supQty) ? 1 : 0;
+                                      
+                                      const totalItemMods = skModCount + postArchiveModsCount + supCorrection + manCorrection;
+                                      
+                                      return totalItemMods > 0 && (
+                                        <div className="mt-1 flex gap-1 items-start flex-wrap">
+                                          <span className="text-[8px] bg-emerald-100 text-emerald-800 border border-emerald-200 font-extrabold px-1 py-0.5 rounded-sm flex items-center gap-1 shadow-3xs" title="إجمالي عدد التعديلات على هذا الصنف">
+                                            🔄 ({totalItemMods})
+                                          </span>
+                                        </div>
+                                      );
+                                    })()}
                                     {item.inventoriedByName && (
                                       <div className="text-[8px] text-emerald-600 font-bold mt-0.5 flex flex-col items-start gap-0.5 leading-none">
                                         <div className="flex flex-row gap-1 items-center flex-wrap">
@@ -7980,7 +8193,9 @@ export default function App() {
                                                 }
                                                 return i;
                                               });
-                                              setInspectSession({ ...inspectSession, items: newItems });
+                                              const updatedSession = { ...inspectSession, items: newItems };
+                                              setInspectSession(updatedSession);
+                                              pushPastSessionUpdate(updatedSession);
                                             }}
                                             className="text-[9px] bg-white border border-slate-200 rounded px-1 py-0.5 font-sans focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer w-20"
                                           >
@@ -8053,13 +8268,29 @@ export default function App() {
                                 <>
                                   <div className="col-span-4 text-right pr-1">
                                     <span className="font-bold text-slate-800 block text-[10px] break-words leading-tight" title={item.itemName}>{item.itemName}</span>
-                                    {item.storekeeperModifications && item.storekeeperModifications.length > 0 && (
-                                      <div className="mt-1 flex gap-1 items-start flex-wrap">
-                                        <span className="text-[8px] bg-emerald-100 text-emerald-800 border border-emerald-200 font-extrabold px-1 py-0.5 rounded-sm flex items-center gap-1 shadow-3xs" title="عدد مرات إعادة الجرد">
-                                          🔄 ({item.storekeeperModifications.length})
-                                        </span>
-                                      </div>
-                                    )}
+                                    {(() => {
+                                      const skModCount = item.storekeeperModifications?.length || 0;
+                                      const postArchiveModsCount = (inspectSession?.modifications || []).filter((m: any) => 
+                                        m.itemChanges?.some((c: any) => c.itemId === item.itemId)
+                                      ).length;
+                                      
+                                      const skQty = (item.storekeeperQty !== undefined && item.storekeeperQty !== null) ? item.storekeeperQty : null;
+                                      const supQty = (item.supervisorQty !== undefined && item.supervisorQty !== null) ? item.supervisorQty : null;
+                                      const manQty = (item.managerQty !== undefined && item.managerQty !== null) ? item.managerQty : null;
+                                      
+                                      const supCorrection = (supQty !== null && skQty !== null && supQty !== skQty) ? 1 : 0;
+                                      const manCorrection = (manQty !== null && supQty !== null && manQty !== supQty) ? 1 : 0;
+                                      
+                                      const totalItemMods = skModCount + postArchiveModsCount + supCorrection + manCorrection;
+                                      
+                                      return totalItemMods > 0 && (
+                                        <div className="mt-1 flex gap-1 items-start flex-wrap">
+                                          <span className="text-[8px] bg-emerald-100 text-emerald-800 border border-emerald-200 font-extrabold px-1 py-0.5 rounded-sm flex items-center gap-1 shadow-3xs" title="إجمالي عدد التعديلات على هذا الصنف">
+                                            🔄 ({totalItemMods})
+                                          </span>
+                                        </div>
+                                      );
+                                    })()}
                                     {item.inventoriedByName && (
                                       <div className="text-[8px] text-emerald-600 font-bold mt-0.5 flex flex-col items-start gap-0.5 leading-none">
                                         <div className="flex flex-row gap-1 items-center flex-wrap">
@@ -8084,7 +8315,39 @@ export default function App() {
                                   </div>
 
                                   <div className="col-span-2 font-mono font-bold text-blue-700 flex justify-center items-center">
-                                    {isCounted ? item.physicalQty : "—"}
+                                    {isEditingInspectSession ? (
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        value={item.physicalQty === null ? "" : item.physicalQty}
+                                        onChange={(e) => {
+                                          const val = e.target.value;
+                                          const newQty = val === "" ? null : Number(val);
+                                          const newItems = (inspectSession.items || []).map(i => {
+                                            if (i.itemId === item.itemId) {
+                                              const roleUpdates: any = {};
+                                              if (user?.role === 'program_manager') roleUpdates.managerQty = newQty;
+                                              else if (['supervisor', 'warehouse_supervisor', 'stores_manager'].includes(user?.role || '')) roleUpdates.supervisorQty = newQty;
+                                              else if (user?.role === 'storekeeper') roleUpdates.storekeeperQty = newQty;
+
+                                              return { 
+                                                ...i, 
+                                                physicalQty: newQty, 
+                                                ...roleUpdates,
+                                                inventoriedByCode: user?.code,
+                                                inventoriedByName: user?.name,
+                                                inventoriedAt: new Date().toISOString()
+                                              };
+                                            }
+                                            return i;
+                                          });
+                                          setInspectSession({ ...inspectSession, items: newItems });
+                                        }}
+                                        className="w-14 px-1 py-0.5 text-center border border-blue-200 rounded text-xs no-spin focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
+                                      />
+                                    ) : (
+                                      isCounted ? item.physicalQty : "—"
+                                    )}
                                   </div>
 
                                   <div className="col-span-2 text-center font-sans">
@@ -8357,7 +8620,9 @@ export default function App() {
                           }
                           return i;
                         });
-                        setInspectSession({ ...inspectSession, items: updatedItems });
+                        const updatedSession = { ...inspectSession, items: updatedItems };
+                        setInspectSession(updatedSession);
+                        pushPastSessionUpdate(updatedSession);
                       } else if (activeSession) {
                         // Modifying activeSession
                         const updatedItems = activeSession.items.map(i => {
@@ -8397,17 +8662,31 @@ export default function App() {
       )}
 
       <DeletionReasonModal />
+      <DeleteItemConfirmModal />
       
       {isShowingMirror && user && ["general_manager", "system_admin", "super_admin", "program_manager"].includes(user.role) && (
         <MasterInventoryMirror 
           items={masterItems} 
           userCanClear={["general_manager", "system_admin", "super_admin", "program_manager"].includes(user.role)}
+          localActiveSession={activeSession}
+          onImportActiveSession={(session) => {
+            setActiveSession(session);
+            localStorage.setItem("inventory_active_session", JSON.stringify(session));
+            fetchStateFromServer(true);
+          }}
           onClose={() => setIsShowingMirror(false)} 
           onSync={() => {
             fetchCloudBackupInfo(true);
             setMasterItems([]);
             setActiveSession(null);
+            setPastSessions([]);
             localStorage.removeItem("inventory_active_session");
+            localStorage.removeItem("inventory_master_items");
+            localStorage.removeItem("inventory_past_sessions");
+            localStorage.removeItem("inventory_has_unsaved_changes");
+            localStorage.removeItem("inventory_has_pending_assignments");
+            localStorage.removeItem("inventory_has_local_only_changes");
+            localStorage.setItem("inventory_last_updated", "0");
             fetchStateFromServer(true);
           }}
         />

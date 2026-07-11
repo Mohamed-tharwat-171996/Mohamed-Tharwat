@@ -50,12 +50,9 @@ export default function UserAccessControlModal({
     const matchesRole = selectedRole === "all" || u?.role === selectedRole;
     return matchesSearch && matchesRole;
   }).sort((a, b) => {
-    // Sort by role then name
-    const roleOrder: Record<string, number> = { 'general_manager': 0, 'system_admin': 1, 'program_manager': 2, 'supervisor': 3, 'stores_manager': 4, 'storekeeper': 5 };
-    const orderA = roleOrder[a?.role || 'storekeeper'] ?? 6;
-    const orderB = roleOrder[b?.role || 'storekeeper'] ?? 6;
-    if (orderA !== orderB) return orderA - orderB;
-    return String(a?.name || "").localeCompare(String(b?.name || ""), 'ar');
+    const codeA = parseInt(String(a?.code || "")) || 0;
+    const codeB = parseInt(String(b?.code || "")) || 0;
+    return codeA - codeB;
   });
 
   const handleToggle = (userCode: string, currentStatus: boolean | undefined) => {
@@ -207,14 +204,10 @@ export default function UserAccessControlModal({
                   <div className="flex items-center gap-3">
                     <div>
                       <div className="flex items-center gap-2">
+                        {codeValue && <span className="font-mono text-slate-400 ml-1.5 text-[10px] shrink-0">[{codeValue}]</span>}
                         <span className="text-[11px] font-black text-slate-800">{nameValue}</span>
                       </div>
                       <div className="flex items-center flex-wrap gap-2 mt-1">
-                        {codeValue && (
-                          <span className="text-[9px] font-black text-slate-500 font-mono bg-slate-100/80 px-1.5 py-0.5 rounded-lg border border-slate-200">
-                            كود: {codeValue}
-                          </span>
-                        )}
                         <span className={`text-[8px] font-bold px-1.5 py-px rounded-md border ${
                            u?.role === 'general_manager' ? "bg-gray-100 text-gray-700 border-gray-200" :
                            u?.role === 'system_admin' ? "bg-purple-50 text-purple-700 border-purple-100" :

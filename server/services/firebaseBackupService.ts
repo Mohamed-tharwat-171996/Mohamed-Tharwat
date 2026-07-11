@@ -96,6 +96,36 @@ export class FirebaseBackupService {
   private static lastBackupTime = 0;
   private static lastHash = "";
   private static readonly BACKUP_INTERVAL = 300000; // 5 minutes limit
+  private static lastDownwardSyncTime = 0;
+  private static isDownwardSyncing = false;
+
+  public static async triggerBackgroundSync(broadcastFn?: (freshState: any) => void): Promise<void> {
+    if (getFirestoreApiDisabled()) return;
+    if (this.isDownwardSyncing) {
+      return;
+    }
+    const now = Date.now();
+    // Throttled: 30 seconds rate-limit for automatic background sync
+    if (now - this.lastDownwardSyncTime < 30000) {
+      return;
+    }
+    this.isDownwardSyncing = true;
+    try {
+      await this.syncActiveStateFromCloud();
+      await this.syncSnapshotsFromCloud();
+      await this.syncDeletedSessionsFromCloud();
+      this.lastDownwardSyncTime = Date.now();
+      if (broadcastFn) {
+        const { SessionService } = await import("./sessionService");
+        const freshState = SessionService.getState();
+        broadcastFn(freshState);
+      }
+    } catch (err: any) {
+      console.warn("⚠️ Background cloud sync failed:", err.message || err);
+    } finally {
+      this.isDownwardSyncing = false;
+    }
+  }
 
   private static getMirrorPath(): string {
     const env = getAppEnv();
@@ -525,6 +555,7 @@ export class FirebaseBackupService {
             itemCount: mirror.activeSession ? (mirror.activeSession.items || []).length : 0,
             masterItemCount: (mirror.masterItems || []).length,
             hasActiveSession: !!(mirror.activeSession && mirror.activeSession.id),
+            activeSessionInCloud: mirror.activeSession || null,
             userCount: (mirror.registeredUsers || []).length,
             history: mirror.history || [],
             storageBytes: localStorageBytes
@@ -563,6 +594,7 @@ export class FirebaseBackupService {
             itemCount: mirror.activeSession ? (mirror.activeSession.items || []).length : 0,
             masterItemCount: (mirror.masterItems || []).length,
             hasActiveSession: !!(mirror.activeSession && mirror.activeSession.id),
+            activeSessionInCloud: mirror.activeSession || null,
             userCount: hasLiveUsersCount ? liveUsersCount : (mirror.registeredUsers || []).length,
             history: mirror.history || [],
             storageBytes: localStorageBytes
@@ -642,6 +674,7 @@ export class FirebaseBackupService {
         itemCount: data.activeSession ? (data.activeSession.items || []).length : 0,
         masterItemCount: (data.masterItems || []).length,
         hasActiveSession: !!(data.activeSession && data.activeSession.id),
+        activeSessionInCloud: data.activeSession || null,
         userCount: usersCount,
         history: historyList,
         storageBytes: storageBytes
@@ -715,6 +748,7 @@ export class FirebaseBackupService {
           let val = rawData;
           if (rawData.session && typeof rawData.session === 'object') {
             val = { ...rawData.session, ...rawData };
+            delete val.session;
           }
 
           const sid = val.id || val.session_id || doc.id;
@@ -1434,7 +1468,7 @@ export class FirebaseBackupService {
     }
   }
 
-  public static async clearMasterMirror() {
+    public static async clearMasterMirror() {
     try {
       const db = getFirestoreDB(true);
       if (!db) {
@@ -1446,42 +1480,39 @@ export class FirebaseBackupService {
       const collName = resolveCollectionName("app_state");
       const docRef = doc(db, collName, docName);
       
-      // 1. Wipe the central app_state document master and active data
-      await withTimeout(setDoc(docRef, { 
+      // Wipe the main app_state doc
+      await setDoc(docRef, { 
         masterItems: [], 
         activeSession: null,
         lastUpdated: Date.now(),
         updatedAtString: new Date().toISOString() 
-      }, { merge: true }), 10000, "clear-mirror");
+      });
       
-      // 2. Wipe cloud collection snapshots and deleted_sessions if possible
-      try {
-        const snapshotsColl = resolveCollectionName("inventory_snapshots");
-        const deletedColl = resolveCollectionName("deleted_sessions");
-        
-        const snaps = await getDocs(collection(db, snapshotsColl));
-        for (const d of snaps.docs) {
-          await deleteDoc(d.ref);
+      // Wipe subcollections asynchronously in the background so we don't block/timeout the HTTP request
+      (async () => {
+        try {
+          const snapshotsColl = resolveCollectionName("inventory_snapshots");
+          const deletedColl = resolveCollectionName("deleted_sessions");
+          const tombstonesColl = resolveCollectionName("permanent_tombstones");
+          
+          const snaps = await getDocs(collection(db, snapshotsColl));
+          await Promise.all(snaps.docs.map(d => deleteDoc(d.ref).catch(() => {})));
+          
+          const dels = await getDocs(collection(db, deletedColl));
+          await Promise.all(dels.docs.map(d => deleteDoc(d.ref).catch(() => {})));
+
+          const stones = await getDocs(collection(db, tombstonesColl));
+          await Promise.all(stones.docs.map(d => deleteDoc(d.ref).catch(() => {})));
+          console.log("☁️ CLOUD CLEAR: Finished pruning all cloud subcollections.");
+        } catch (e: any) {
+          console.warn("⚠️ Cloud collection destructive prune partial failure:", e.message || e);
         }
-        
-        const dels = await getDocs(collection(db, deletedColl));
-        for (const d of dels.docs) {
-          await deleteDoc(d.ref);
-        }
-      } catch (e) {
-        console.warn("⚠️ Cloud collection destructive prune partial failure:", e);
-      }
+      })();
 
       const mirrorPath = this.getMirrorPath();
       if (fs.existsSync(mirrorPath)) {
         try {
-          let mirror = JSON.parse(fs.readFileSync(mirrorPath, "utf-8"));
-          mirror.masterItems = [];
-          mirror.activeSession = null;
-          mirror.pastSessions = [];
-          mirror.deletedSessions = [];
-          mirror.updatedAtString = new Date().toISOString();
-          fs.writeFileSync(mirrorPath, JSON.stringify(mirror, null, 2), "utf-8");
+          fs.unlinkSync(mirrorPath);
         } catch(e) {}
       }
       return true;

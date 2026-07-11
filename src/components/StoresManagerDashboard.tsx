@@ -584,7 +584,7 @@ export default function StoresManagerDashboard({
       const diff = physical - book;
       
       // Detection of corrections
-      const isSupervisorCorrection = false;
+      const isSupervisorCorrection = supervisorVal !== null && supervisorVal !== skVal;
       const isManagerCorrection = managerVal !== null && ((supervisorVal !== null && managerVal !== supervisorVal) || (supervisorVal === null && managerVal !== skVal));
       
       const correctionAmount = Math.abs(physical - (skVal || 0));
@@ -923,7 +923,7 @@ export default function StoresManagerDashboard({
       }
 
       // Check for supervisor recount override / correction
-      const isSupervisorCorrection = false;
+      const isSupervisorCorrection = supervisorVal !== null && supervisorVal !== skVal;
       const managerVal = item.managerQty !== undefined && item.managerQty !== null ? item.managerQty : null;
 
       let sessionModsCount = 0;
@@ -963,12 +963,12 @@ export default function StoresManagerDashboard({
         totalSupervisorCorrections += 1;
       }
 
-      const pmCountForThisItem = sessionModsCount + (isManagerActiveSessionCorrection ? 1 : 0);
-      if (pmCountForThisItem > 0) {
-        totalManagerCorrections += pmCountForThisItem;
+      const hasManagerCorrection = (sessionModsCount > 0) || isManagerActiveSessionCorrection;
+      if (hasManagerCorrection) {
+        totalManagerCorrections += (sessionModsCount + (isManagerActiveSessionCorrection ? 1 : 0));
       }
 
-      const totalModsForThisItem = pmCountForThisItem + (isSupervisorCorrection ? 1 : 0);
+      const totalModsForThisItem = (hasManagerCorrection ? 1 : 0) + (isSupervisorCorrection ? 1 : 0);
       if (totalModsForThisItem > 0) {
         totalCorrectionQtyValue += Math.abs((managerVal !== null ? managerVal : physical) - (skVal || 0));
       }
@@ -1036,12 +1036,19 @@ export default function StoresManagerDashboard({
       const correctionAmount = isCorrected ? Math.abs((supervisorVal ?? managerVal ?? storekeeperVal) - storekeeperVal) : 0;
 
       // Find supervisor correction
-      const isSupervisorCorrection = false;
+      const isSupervisorCorrection = supervisorVal !== null && supervisorVal !== storekeeperVal;
 
       // Find manager corrections
       const session = filteredData.sessions.find(s => s.id === item.sessionId);
-      let sessionModsCount = 0;
-      let qtyAtArchiveForCount = managerVal;
+      const skMods = getStorekeeperModifications(item);
+      const storekeeperModCount = skMods.length;
+      const supervisorModCount = (supervisorVal !== null && supervisorVal !== storekeeperVal) ? 1 : 0;
+
+      const preManagerQtyForCount = supervisorVal !== null ? supervisorVal : storekeeperVal;
+      
+      let managerModCount = 0;
+      let lastValForManager = preManagerQtyForCount;
+
       if (session && session.modifications) {
         const itemMods = session.modifications.filter((mod: any) => {
           return mod.itemChanges?.some((change: any) => {
@@ -1052,30 +1059,27 @@ export default function StoresManagerDashboard({
             return (cId && cId === currentId) || (cName && cName === currentName);
           });
         });
-        sessionModsCount = itemMods.length;
         
-        if (itemMods.length > 0) {
-          const firstMod = itemMods.sort((a: any, b: any) => new Date(a.modifiedAt || a.timestamp || 0).getTime() - new Date(b.modifiedAt || b.timestamp || 0).getTime())[0];
-          const itemChange = firstMod.itemChanges?.find((c: any) => {
-             const cId = String(c.id || c.itemId || c.itemCode || "").trim();
-             const currentId = String(item.id || item.itemId || item.itemCode || "").trim();
-             const cName = String(c.name || c.itemName || "").trim().toLowerCase();
-             const currentName = String(item.name || item.itemName || "").trim().toLowerCase();
-             return (cId && cId === currentId) || (cName && cName === currentName);
+        const sortedMods = itemMods.sort((a: any, b: any) => new Date(a.modifiedAt || a.timestamp || 0).getTime() - new Date(b.modifiedAt || b.timestamp || 0).getTime());
+        
+        sortedMods.forEach((mod: any) => {
+          const change = mod.itemChanges?.find((c: any) => {
+            const cId = String(c.id || c.itemId || c.itemCode || "").trim();
+            const currentId = String(item.id || item.itemId || item.itemCode || "").trim();
+            const cName = String(c.name || c.itemName || "").trim().toLowerCase();
+            const currentName = String(item.name || item.itemName || "").trim().toLowerCase();
+            return (cId && cId === currentId) || (cName && cName === currentName);
           });
-          if (itemChange) {
-            qtyAtArchiveForCount = itemChange.oldPhysicalQty !== undefined ? itemChange.oldPhysicalQty : itemChange.oldQty;
+          if (change) {
+            managerModCount += 1;
+            lastValForManager = (change.newPhysicalQty !== undefined ? change.newPhysicalQty : (change.newQty ?? 0));
           }
-        }
+        });
       }
 
-      const preManagerQtyForCount = supervisorVal !== null ? supervisorVal : storekeeperVal;
-      const isManagerActiveSessionCorrection = qtyAtArchiveForCount !== null && preManagerQtyForCount !== null && qtyAtArchiveForCount !== preManagerQtyForCount;
-
-      const id = String(item.itemId || item.id || "");
-      const storekeeperModCount = getStorekeeperModifications(item).length;
-      const supervisorModCount = isSupervisorCorrection ? 1 : 0;
-      const managerModCount = sessionModsCount + (isManagerActiveSessionCorrection ? 1 : 0);
+      if (managerVal !== null && lastValForManager !== null && managerVal !== lastValForManager) {
+        managerModCount += 1;
+      }
 
       if (!grouped.has(code)) {
         grouped.set(code, {
@@ -1087,9 +1091,9 @@ export default function StoresManagerDashboard({
           sessionIds: new Set<string>(),
           perfectMatches: 0,           // storekeeper count matched book value initially
           recheckedItemsCount: 0,      // Unique items with recount/correction events
-          totalStorekeeperModifications: 0, // Storekeeper's recounts
-          totalSupervisorCorrections: 0,    // Supervisor's overrides
-          totalManagerCorrections: 0,       // Program Manager's overrides
+          totalStorekeeperModifications: 0, // Storekeeper's recounts quantity
+          totalSupervisorCorrections: 0,    // Supervisor's overrides quantity
+          totalManagerCorrections: 0,       // Program Manager's overrides quantity
           totalRecheckVariance: 0,
           history: []
         });
@@ -1105,8 +1109,9 @@ export default function StoresManagerDashboard({
         auditor.totalSubmitted += 1;
       }
 
-      // Add to unique rechecks items count if this item had any modifications
-      if (storekeeperModCount > 0 || supervisorModCount > 0 || managerModCount > 0) {
+      // Add to unique rechecks items count if this item had any modifications or was rechecked by supervisor/manager
+      const isRechecked = skMods.length > 0 || supervisorVal !== null || managerVal !== null;
+      if (isRechecked) {
         auditor.recheckedItemsCount += 1;
       }
 
@@ -1138,7 +1143,7 @@ export default function StoresManagerDashboard({
         storekeeperModCount,
         supervisorModCount,
         managerModCount,
-        storekeeperModifications: getStorekeeperModifications(item)
+        storekeeperModifications: skMods
       });
     });
 
@@ -1191,9 +1196,9 @@ export default function StoresManagerDashboard({
         if (h.note) {
           day.notes.push(h.note);
         }
-        day.totalStorekeeperModifications += h.storekeeperModCount || 0;
-        day.totalSupervisorCorrections += h.supervisorModCount || 0;
-        day.totalManagerCorrections += h.managerModCount || 0;
+        day.totalStorekeeperModifications += (h.storekeeperModCount || 0);
+        day.totalSupervisorCorrections += (h.supervisorModCount || 0);
+        day.totalManagerCorrections += (h.managerModCount || 0);
         if (h.storekeeperModifications) {
           day.storekeeperModifications.push(...h.storekeeperModifications);
         }
@@ -1211,7 +1216,11 @@ export default function StoresManagerDashboard({
         accuracyRate: recountMatchRate, // Primary sorting score
         dailyHistory
       };
-    }).sort((a, b) => b.totalAssigned - a.totalAssigned);
+    }).sort((a, b) => {
+      const codeA = parseInt(String(a.code)) || 0;
+      const codeB = parseInt(String(b.code)) || 0;
+      return codeA - codeB;
+    });
   }, [filteredData, allUsers]);
 
   // 8. Supervisors performance (Tab 2 sub-tab 2) - CRITICAL USER REQUEST
@@ -1222,18 +1231,21 @@ export default function StoresManagerDashboard({
       const isApproved = session.supervisorApproved || session.supervisorApprovedBy;
       if (isApproved) {
         const name = session.supervisorApprovedBy || "مشرف غير محدد";
+        const supCode = allUsers.find(u => u.name === name || u.code === session.supervisorApprovedByCode)?.code || "";
         const dateStr = session.date ? session.date.split("T")[0] : "غير محدد";
 
         if (!map.has(name)) {
           map.set(name, {
             name,
+            code: supCode,
             totalSessionsApproved: 0,
             totalItemsVerified: 0,
             recountsPerformed: 0,
-            recountCorrections: 0,
+            totalSupervisorCorrections: 0,
             totalCorrectionQty: 0,
             perfectBookMatches: 0,
             totalStorekeeperModifications: 0,
+            totalSupervisorCorrections: 0,
             totalManagerCorrections: 0,
             totalOverageQty: 0,
             totalShortageQty: 0,
@@ -1284,22 +1296,62 @@ export default function StoresManagerDashboard({
             (managerVal !== null && managerVal !== skVal)
           );
           
-          const isManagerCorrection = managerVal !== null && ((supervisorVal !== null && managerVal !== supervisorVal) || (supervisorVal === null && managerVal !== skVal));
-          const isSupervisorCorrection = false;
-          const storekeeperModCount = getStorekeeperModifications(item).length;
-
-          if (isManagerCorrection) sup.totalManagerCorrections += 1;
-          sup.totalStorekeeperModifications += storekeeperModCount;
-
-          const correctionAmount = hasRecountCorrection ? Math.abs((supervisorVal ?? managerVal ?? skVal) - skVal) : 0;
-
-          if (supervisorVal !== null || managerVal !== null) {
-            sup.recountsPerformed += 1;
-            if (hasRecountCorrection) {
-              sup.recountCorrections += 1;
-              sup.totalCorrectionQty += correctionAmount;
+          const isSupervisorCorrection = supervisorVal !== null && supervisorVal !== skVal;
+          const skMods = getStorekeeperModifications(item);
+          const storekeeperModCount = skMods.length;
+          const supervisorModCount = isSupervisorCorrection ? 1 : 0;
+          
+          const itemMods = (session && session.modifications) ? session.modifications.filter((mod: any) => {
+            return mod.itemChanges?.some((change: any) => {
+              const cId = String(change.id || change.itemId || change.itemCode || "").trim();
+              const currentId = String(item.id || item.itemId || item.itemCode || "").trim();
+              const cName = String(change.name || change.itemName || "").trim().toLowerCase();
+              const currentName = String(item.name || item.itemName || "").trim().toLowerCase();
+              return (cId && cId === currentId) || (cName && cName === currentName);
+            });
+          }) : [];
+          
+          const lastValForManager = supervisorVal !== null ? supervisorVal : skVal;
+          const isManagerActiveSessionCorrection = (managerVal !== null && lastValForManager !== null && managerVal !== lastValForManager);
+          
+          // Count manager modifications: 
+          // 1. Modifications in session (itemMods)
+          // 2. Active session correction by manager if managerVal differs from lastValForManager
+          // We must be careful not to double count if the last mod in itemMods ALREADY resulted in the current managerVal.
+          
+          let managerModCount = itemMods.length;
+          
+          // Check if the last modification in itemMods already matches managerVal
+          const sortedMods = itemMods.sort((a: any, b: any) => new Date(a.modifiedAt || a.timestamp || 0).getTime() - new Date(b.modifiedAt || b.timestamp || 0).getTime());
+          
+          let lastModVal = lastValForManager;
+          if (sortedMods.length > 0) {
+            const lastMod = sortedMods[sortedMods.length - 1];
+            const change = lastMod.itemChanges?.find((c: any) => {
+                const cId = String(c.id || c.itemId || c.itemCode || "").trim();
+                const currentId = String(item.id || item.itemId || item.itemCode || "").trim();
+                const cName = String(c.name || c.itemName || "").trim().toLowerCase();
+                const currentName = String(item.name || item.itemName || "").trim().toLowerCase();
+                return (cId && cId === currentId) || (cName && cName === currentName);
+            });
+            if (change) {
+                lastModVal = (change.newPhysicalQty !== undefined ? change.newPhysicalQty : (change.newQty ?? 0));
             }
           }
+          
+          if (managerVal !== null && managerVal !== lastModVal) {
+            managerModCount += 1;
+          }
+
+          sup.totalManagerCorrections += managerModCount;
+          sup.totalStorekeeperModifications += storekeeperModCount;
+          sup.totalSupervisorCorrections += supervisorModCount;
+
+        const correctionAmount = hasRecountCorrection ? Math.abs((supervisorVal ?? managerVal ?? skVal) - skVal) : 0;
+
+        if (supervisorVal !== null || managerVal !== null) {
+          sup.recountsPerformed += 1;
+        }
 
           sup.history.push({
             itemId: item.itemId || item.id,
@@ -1314,14 +1366,9 @@ export default function StoresManagerDashboard({
             diff,
             storekeeperName: allUsers.find(u => String(u.code) === String(item.assignedTo))?.name || `أمين (${item.assignedTo || "عام"})`,
             note: item.note || item.notes || "",
-            totalStorekeeperModifications: getStorekeeperModifications(item).length,
-            totalSupervisorCorrections: (skVal !== null && supervisorVal !== null && skVal !== supervisorVal) ? 1 : 0,
-            totalManagerCorrections: (session.modifications || []).filter((mod: any) => 
-              mod.itemChanges?.some((change: any) => 
-                String(change.id || change.itemId || change.itemCode || "") === String(item.itemId || item.id) ||
-                String(change.name || change.itemName || "").toLowerCase() === String(item.name || item.itemName || "").toLowerCase()
-              )
-            ).length
+            totalStorekeeperModifications: storekeeperModCount,
+            totalSupervisorCorrections: supervisorModCount,
+            totalManagerCorrections: managerModCount
           });
         });
       }
@@ -1366,7 +1413,8 @@ export default function StoresManagerDashboard({
         }
         const day = dailyMap.get(groupKey);
         day.totalItems += 1;
-        if (h.isCorrected) {
+        // Count as re-inventory if supervisor corrected it OR if storekeeper had modifications
+        if (h.isCorrected || (h.totalStorekeeperModifications && h.totalStorekeeperModifications > 0)) {
           day.recountsCount += 1;
           day.totalCorrectionQty += h.correctionAmount;
         }
@@ -1377,9 +1425,9 @@ export default function StoresManagerDashboard({
         if (h.note) {
           day.notes.push(h.note);
         }
-        day.totalStorekeeperModifications += h.totalStorekeeperModifications || 0;
-        day.totalSupervisorCorrections += h.totalSupervisorCorrections || 0;
-        day.totalManagerCorrections += h.totalManagerCorrections || 0;
+        day.totalStorekeeperModifications += (h.totalStorekeeperModifications || 0);
+        day.totalSupervisorCorrections += (h.totalSupervisorCorrections || 0);
+        day.totalManagerCorrections += (h.totalManagerCorrections || 0);
       });
 
       const dailyHistory = Array.from(dailyMap.values()).map(day => ({
@@ -1394,7 +1442,11 @@ export default function StoresManagerDashboard({
         qualityScore,
         dailyHistory
       };
-    }).sort((a, b) => b.totalSessionsApproved - a.totalSessionsApproved);
+    }).sort((a, b) => {
+      const codeA = parseInt(String(a.code)) || 0;
+      const codeB = parseInt(String(b.code)) || 0;
+      return codeA - codeB;
+    });
   }, [pastSessions]);
 
   // 9. General Dashboard (Tab 3) - Daily Timelines (Without categories as requested)
@@ -2165,7 +2217,7 @@ export default function StoresManagerDashboard({
                       <tbody>
                         {auditorsDashboardData.length === 0 ? (
                            <tr>
-                             <td colSpan={13} className="text-center py-12 text-slate-400 font-bold">لا يوجد أمناء جرد مسجلين أو جرد متاح لهذه الفترة</td>
+                             <td colSpan={11} className="text-center py-12 text-slate-400 font-bold">لا يوجد أمناء جرد مسجلين أو جرد متاح لهذه الفترة</td>
                            </tr>
                         ) : (
                            auditorsDashboardData.map(auditor => {
@@ -2274,18 +2326,8 @@ export default function StoresManagerDashboard({
                                                       {day.rechecksCount > 0 ? (
                                                         <div className="flex flex-col gap-0.5">
                                                           <span className="bg-rose-50 text-rose-700 px-2 py-0.5 rounded text-[9px] font-black border border-rose-100 whitespace-nowrap self-start">
-                                                            تمت اعادة جرد {day.rechecksCount} صنف باجمالي تعديلات {day.totalStorekeeperModifications + day.totalSupervisorCorrections + day.totalManagerCorrections}
+                                                            تمت اعادة جرد {day.rechecksCount} صنف باجمالي تعديلات {day.totalStorekeeperModifications + day.totalSupervisorCorrections + day.totalManagerCorrections} صنف
                                                           </span>
-                                                          {/* Detailed mods for this day if available */}
-                                                          {day.storekeeperModifications && day.storekeeperModifications.length > 0 && (
-                                                            <div className="flex flex-wrap gap-1 max-w-[300px]">
-                                                              {day.storekeeperModifications.map((m: any, midx: number) => (
-                                                                <span key={midx} className="bg-orange-50 text-orange-700 border border-orange-100 px-1 rounded text-[7px] font-bold">
-                                                                  {m.oldQty} ➔ {m.newQty}
-                                                                </span>
-                                                              ))}
-                                                            </div>
-                                                          )}
                                                         </div>
                                                       ) : (
                                                         <span className="bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded text-[9px] font-bold border border-emerald-100 whitespace-nowrap">
@@ -2372,21 +2414,22 @@ export default function StoresManagerDashboard({
                               <ChevronDown className={`w-3.5 h-3.5 transition-transform ${expandedSupervisorNames.length === supervisorStats.length && supervisorStats.length > 0 ? 'rotate-180' : ''}`} />
                             </button>
                           </th>
-                          <th className="px-3 py-2 min-w-[200px]">اسم المشرف (الوردية)</th>
+                          <th className="px-3 py-2 w-28">كود المشرف</th>
+                          <th className="px-3 py-2 min-w-[200px]">الاسم الكامل</th>
                           <th className="px-3 py-2 w-32 text-center">الورديات المعتمدة</th>
-                          <th className="px-3 py-2 w-32 text-center">الأصناف المدققة</th>
-                          <th className="px-3 py-2 w-32 text-center">تعديلات الجرد (التصحيح)</th>
+                          <th className="px-3 py-2 w-32 text-center">الأصناف المسندة</th>
+                          <th className="px-3 py-2 w-32 text-center">أصناف تم مراجعتها</th>
+                          <th className="px-3 py-2 w-32 text-center">تعديلات الأمين</th>
+                          <th className="px-3 py-2 w-32 text-center">تعديلات المشرفين</th>
                           <th className="px-3 py-2 w-32 text-center">تعديلات المسؤول</th>
                           <th className="px-3 py-2 w-32 text-center">اجمالي التعديلات</th>
-                          <th className="px-3 py-2 w-32 text-center">إجمالي وحدات التعديل</th>
-                          <th className="px-3 py-2 w-32 text-center">دقة الجرد الإجمالي</th>
                           <th className="pl-4 py-2 w-40 text-center">مؤشر جودة الإشراف</th>
                         </tr>
                       </thead>
                       <tbody>
                         {supervisorStats.length === 0 ? (
                           <tr>
-                            <td colSpan={10} className="text-center py-12 text-slate-400 font-bold">لم يتم تسجيل أي اعتماد رسمي من قبل مشرفي المخازن حتى الآن</td>
+                            <td colSpan={11} className="text-center py-12 text-slate-400 font-bold">لم يتم تسجيل أي اعتماد رسمي من قبل مشرفي المخازن حتى الآن</td>
                           </tr>
                         ) : (
                           supervisorStats.map(sup => {
@@ -2402,15 +2445,19 @@ export default function StoresManagerDashboard({
                                   <td className="pr-4 py-2 text-center text-slate-400">
                                     {isExpanded ? <ChevronUp className="w-4 h-4 text-indigo-600" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
                                   </td>
-                                  <td className="px-3 py-2 text-slate-800 font-extrabold flex items-center gap-2">
-                                    <span className="w-2 h-2 bg-indigo-500 rounded-full" />
-                                    {sup.name}
-                                  </td>
+                                  <td className="px-3 py-2 font-mono text-[10px] text-slate-500 font-bold">{sup.code}</td>
+                                  <td className="px-3 py-2 text-slate-800 font-bold">{sup.name}</td>
                                   <td className="px-3 py-2 text-center font-mono font-bold text-indigo-950">{sup.totalSessionsApproved} ورديات</td>
                                   <td className="px-3 py-2 text-center font-mono font-bold text-slate-700">{sup.totalItemsVerified} صنفاً</td>
-                                  <td className="px-3 py-2 text-center">
-                                    <span className="bg-amber-50 border border-amber-200 text-amber-800 px-2.5 py-0.5 rounded-full text-[10px] font-black font-mono">
-                                      {sup.recountCorrections}
+                                  <td className="px-3 py-2 text-center font-mono font-bold text-indigo-600">{sup.recountsPerformed}</td>
+                                  <td className="px-3 py-2 text-center font-mono font-bold text-orange-600">
+                                    <span className="bg-orange-50 text-orange-700 px-2 py-0.5 rounded-full text-[10px] font-black border border-orange-100">
+                                      {sup.totalStorekeeperModifications}
+                                    </span>
+                                  </td>
+                                  <td className="px-3 py-2 text-center font-mono font-bold text-indigo-600">
+                                    <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full text-[10px] font-black border border-indigo-100">
+                                      {sup.totalSupervisorCorrections}
                                     </span>
                                   </td>
                                   <td className="px-3 py-2 text-center font-mono font-bold text-rose-600">
@@ -2420,11 +2467,9 @@ export default function StoresManagerDashboard({
                                   </td>
                                   <td className="px-3 py-2 text-center font-mono font-bold text-slate-600">
                                     <span className="bg-slate-50 text-slate-700 px-2 py-0.5 rounded-full text-[10px] font-black border border-slate-100">
-                                      {sup.totalStorekeeperModifications + sup.recountCorrections + sup.totalManagerCorrections}
+                                      {sup.totalStorekeeperModifications + sup.totalSupervisorCorrections + sup.totalManagerCorrections}
                                     </span>
                                   </td>
-                                  <td className="px-3 py-2 text-center font-mono font-bold text-rose-600">+{sup.totalCorrectionQty} وحدة</td>
-                                  <td className="px-3 py-2 text-center font-mono font-bold text-emerald-600">{sup.bookAccuracy}% مطابقة</td>
                                   <td className="pl-4 py-2 text-center">
                                     <div className="flex items-center justify-center gap-2">
                                       <div className="w-16 bg-slate-100 h-2 rounded-full overflow-hidden">
@@ -2495,14 +2540,16 @@ export default function StoresManagerDashboard({
                                                           <span className="bg-amber-50 text-amber-700 px-2 py-0.5 rounded text-[9px] font-black border border-amber-100 whitespace-nowrap">
                                                             تمت اعادة جرد {day.recountsCount} صنف باجمالي تعديلات {day.totalStorekeeperModifications + day.totalSupervisorCorrections + day.totalManagerCorrections}
                                                           </span>
-                                                          {/* Detailed mods for this day if available */}
-                                                          {day.storekeeperModifications && day.storekeeperModifications.length > 0 && (
+                                                          {/* Detailed supervisor mods if available (Show only supervisor mods as per user request) */}
+                                                          {day.totalSupervisorCorrections > 0 && (
                                                             <div className="flex flex-wrap gap-1 max-w-[300px]">
-                                                              {day.storekeeperModifications.map((m: any, midx: number) => (
-                                                                <span key={midx} className="bg-orange-50 text-orange-700 border border-orange-100 px-1 rounded text-[7px] font-bold">
-                                                                  {m.oldQty} ➔ {m.newQty}
-                                                                </span>
-                                                              ))}
+                                                              {sup.history
+                                                                .filter((h: any) => h.date === day.date && h.sessionName === day.sessionName && h.totalSupervisorCorrections > 0)
+                                                                .map((h: any, midx: number) => (
+                                                                  <span key={midx} className="bg-indigo-50 text-indigo-700 border border-indigo-100 px-1 rounded text-[7px] font-bold">
+                                                                    {h.storekeeper} ➔ {h.supervisor}
+                                                                  </span>
+                                                                ))}
                                                             </div>
                                                           )}
                                                         </div>

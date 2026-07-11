@@ -316,7 +316,13 @@ async function startServer() {
                   if (oldItems.length === newItems.length) {
                     const changedIndices: number[] = [];
                     for (let i = 0; i < oldItems.length; i++) {
-                      if (JSON.stringify(oldItems[i]) !== JSON.stringify(newItems[i])) {
+                      const oldItem = oldItems[i];
+                      const newItem = newItems[i];
+                      const hasChanged = (oldItem.inventoriedAt || 0) !== (newItem.inventoriedAt || 0) ||
+                        oldItem.physicalQty !== newItem.physicalQty ||
+                        oldItem.storekeeperQty !== newItem.storekeeperQty ||
+                        oldItem.supervisorQty !== newItem.supervisorQty;
+                      if (hasChanged) {
                         changedIndices.push(i);
                       }
                     }

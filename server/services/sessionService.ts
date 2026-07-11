@@ -75,7 +75,12 @@ export class SessionService {
       const dbSnapshots = dbService.query("SELECT snapshot_data FROM inventory_snapshots ORDER BY date DESC, created_at DESC LIMIT 200");
       const pastSessions = dbSnapshots.map((row) => {
         const data = JSON.parse(row.snapshot_data);
-        return (data && data.session && (data.session.items || data.session.snapshot_data)) ? data.session : data;
+        if (data && data.session && typeof data.session === 'object') {
+          const flat = { ...data.session, ...data };
+          delete flat.session;
+          return flat;
+        }
+        return data;
       });
 
       // 4.5 Load deleted sessions
@@ -114,6 +119,7 @@ export class SessionService {
       dbService.run("DELETE FROM inventory");
       dbService.run("DELETE FROM inventory_snapshots");
       dbService.run("DELETE FROM deleted_sessions");
+      dbService.run("DELETE FROM permanent_tombstones");
       dbService.run("DELETE FROM settings WHERE key = 'activeSession'");
       const now = Date.now();
       dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedMaster', ?)", [now.toString()]);
@@ -189,9 +195,11 @@ export class SessionService {
         if (incoming.registeredUsers !== undefined) {
           delete incoming.registeredUsers;
         }
-        // 3. Prevent non-managers from editing or deleting historical sessions
-        if (incoming.pastSessions !== undefined) {
-          delete incoming.pastSessions;
+        // 3. Prevent non-managers/supervisors from editing or deleting historical sessions
+        if (actorRole !== "warehouse_supervisor" && actorRole !== "supervisor" && actorRole !== "stores_manager") {
+          if (incoming.pastSessions !== undefined) {
+            delete incoming.pastSessions;
+          }
         }
       }
 
@@ -866,8 +874,10 @@ export class SessionService {
       const dbSnapshots = dbService.query("SELECT snapshot_data FROM inventory_snapshots ORDER BY date DESC, created_at DESC LIMIT 200");
       const pastSessions = dbSnapshots.map((row: any) => {
         const data = JSON.parse(row.snapshot_data);
-        if (data && data.session && typeof data.session === 'object' && (data.session.items || data.session.snapshot_data)) {
-          return data.session;
+        if (data && data.session && typeof data.session === 'object') {
+          const flat = { ...data.session, ...data };
+          delete flat.session;
+          return flat;
         }
         return data;
       });
