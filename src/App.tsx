@@ -511,12 +511,13 @@ export default function App() {
   useEffect(() => {
     if (isShowingMirror && masterItems.length === 0) {
       console.log("🔍 Mirror requested but items empty: Fetching from server...");
-      fetchStateFromServer(true);
+      fetchStateFromServer(true, true);
     }
   }, [isShowingMirror, masterItems.length]);
 
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [isSyncingOffline, setIsSyncingOffline] = useState(false);
+  const isSyncingOfflineRef = useRef(false);
   const [calcItem, setCalcItem] = useState<AuditItem | null>(null);
 
   // Auto-select worksheet tab if session becomes active and no tab is selected
@@ -653,56 +654,87 @@ export default function App() {
     };
   }, [pendingSyncCount, isSyncingOffline]);
 
+  const fetchWithTimeout = async (url: string, options: RequestInit = {}, timeoutMs = 8000) => {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+      clearTimeout(id);
+      return response;
+    } catch (err) {
+      clearTimeout(id);
+      throw err;
+    }
+  };
+
   const processOfflineQueue = async () => {
     if (isSyncingOffline || !navigator.onLine) return;
     
-    const ops = await offlineService.getPendingOperations();
-    if (ops.length === 0) {
-      setPendingSyncCount(0);
-      return;
-    }
-
-    setIsSyncingOffline(true);
-    console.log(`📦 Background Sync: Processing ${ops.length} pending operations...`);
-    
-    const token = localStorage.getItem("inventory_jwt_token");
-    if (!token) {
-      setIsSyncingOffline(false);
-      return;
-    }
-
-    for (const op of ops) {
-      try {
-        const res = await fetch("/api/data", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${token}`
-          },
-          body: JSON.stringify(op.payload)
-        });
-
-        if (res.ok) {
-          await offlineService.removeOperation(op.id);
-          console.log(`✅ Sync Success: Operation ${op.id} moved to server.`);
-        } else {
-          await offlineService.updateRetryCount(op.id);
-          // If server error (not network), we might want to skip or retry later
-          if (res.status >= 500) break; 
-        }
-      } catch (err) {
-        console.warn(`⏳ Sync Delayed: Network still unstable or server unreachable for ${op.id}`);
-        break; // Stop processing and wait for next online event or retry logic
+    try {
+      const ops = await offlineService.getPendingOperations();
+      if (ops.length === 0) {
+        setPendingSyncCount(0);
+        return;
       }
-    }
 
-    const updatedOps = await offlineService.getPendingOperations();
-    setPendingSyncCount(updatedOps.length);
-    setIsSyncingOffline(false);
-    
-    if (updatedOps.length === 0) {
-      showToast("🎉 تمت مزامنة جميع البيانات المعلقة بنجاح!", "success");
-      fetchStateFromServer(true);
+      setIsSyncingOffline(true);
+      isSyncingOfflineRef.current = true;
+      console.log(`📦 Background Sync: Processing ${ops.length} pending operations...`);
+      
+      const token = localStorage.getItem("inventory_jwt_token");
+      if (!token) {
+        return;
+      }
+
+      for (const op of ops) {
+        try {
+          const res = await fetchWithTimeout("/api/data", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${token}`
+            },
+            body: JSON.stringify(op.payload)
+          }, 8000);
+
+          if (res.ok) {
+            await offlineService.removeOperation(op.id);
+            console.log(`✅ Sync Success: Operation ${op.id} moved to server.`);
+            setIsOnline(true);
+          } else {
+            op.retryCount = (op.retryCount || 0) + 1;
+            await offlineService.updateRetryCount(op.id);
+            if (op.retryCount >= 5) {
+               console.error(`Removing poisoned operation ${op.id} after 5 failed retries.`);
+               await offlineService.removeOperation(op.id);
+            }
+            // If server error (not network), we might want to skip or retry later
+            if (res.status >= 500) break; 
+          }
+        } catch (err) {
+          console.warn(`⏳ Sync Delayed: Network still unstable or server unreachable for ${op.id}`);
+          setIsOnline(false);
+          break; // Stop processing and wait for next online event or retry logic
+        }
+      }
+
+      const updatedOps = await offlineService.getPendingOperations();
+      setPendingSyncCount(updatedOps.length);
+      
+      if (updatedOps.length === 0) {
+        showToast("🎉 تمت مزامنة جميع البيانات المعلقة بنجاح!", "success");
+        isSyncingOfflineRef.current = false;
+        setIsSyncingOffline(false);
+        await fetchStateFromServer(true, false);
+      }
+    } catch (err) {
+      console.error("Error in processOfflineQueue:", err);
+    } finally {
+      isSyncingOfflineRef.current = false;
+      setIsSyncingOffline(false);
     }
   };
 
@@ -729,6 +761,19 @@ export default function App() {
 
   // Connection state for offline auditing
   const [isOnline, setIsOnline] = useState<boolean>(typeof window !== 'undefined' ? navigator.onLine : true);
+  const prevOnlineRef = useRef<boolean>(isOnline);
+
+  useEffect(() => {
+    if (isOnline !== prevOnlineRef.current) {
+      if (!isOnline) {
+        showToast("📡 أنت غير متصل بالإنترنت حالياً! تم الانتقال إلى وضع الجرد المحلي (أوفلاين)، جميع مدخلاتك آمنة ومحفوظة.", "error", 4000);
+      } else {
+        showToast("🟢 تمت استعادة الاتصال بالإنترنت! جاري الحفظ التلقائي في أمان كامل.", "success", 4000);
+      }
+      prevOnlineRef.current = isOnline;
+    }
+  }, [isOnline]);
+
   const [isDataLoaded, setIsDataLoaded] = useState<boolean>(false);
   const [isQuotaExceeded, setIsQuotaExceeded] = useState<boolean>(false);
   const [isFirebaseSyncDisabled, setIsFirebaseSyncDisabled] = useState<boolean>(false);
@@ -740,11 +785,9 @@ export default function App() {
   useEffect(() => {
     const handleOnline = () => {
       setIsOnline(true);
-      showToast("🟢 تمت استعادة الاتصال بالإنترنت! جاري الحفظ التلقائي في أمان كامل.", "success", 2050);
     };
     const handleOffline = () => {
       setIsOnline(false);
-      showToast("📡 أنت غير متصل بالإنترنت حالياً! تم الانتقال إلى وضع الجرد المحلي (أوفلاين)، جميع مدخلاتك آمنة ومحفوظة.", "error", 2000);
     };
 
     window.addEventListener("online", handleOnline);
@@ -1009,26 +1052,27 @@ export default function App() {
           
           console.log("SYNC EXECUTED IMMEDIATELY (EXPLICIT ACTION)");
           try {
-            const res = await fetch("/api/data", {
+            const res = await fetchWithTimeout("/api/data", {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
                 "Authorization": `Bearer ${token}`
               },
               body: JSON.stringify(syncPayload)
-            });
+            }, 8000);
             if (!res.ok) {
               const errBody = await res.json().catch(() => ({}));
               throw new Error(errBody.error || errBody.message || "Server error: " + res.statusText);
             }
             console.log("✅ Sync Done: Data pushed to server immediately.");
             localStorage.removeItem("inventory_has_local_only_changes");
+            setIsOnline(true);
           } catch (err: any) {
              console.warn("⚠️ Explicit Action Network Failed: Queuing data for offline sync...", err);
              await offlineService.queueOperation(syncPayload);
              const ops = await offlineService.getPendingOperations();
              setPendingSyncCount(ops.length);
-             showToast("⚠️ انقطع الاتصال: تم حفظ التعديلات محلياً وسيتم رفعها عند عودة الشبكة.", "info");
+             setIsOnline(false);
              // Don't re-throw, so the UI can assume it was 'saved' and cleans unsaved flags.
           }
         } else {
@@ -1070,23 +1114,24 @@ export default function App() {
               ...metadata
             };
 
-            fetch("/api/data", {
+            fetchWithTimeout("/api/data", {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
                 "Authorization": `Bearer ${token}`
               },
               body: JSON.stringify(syncPayload)
-            }).then(async (res) => {
+            }, 10000).then(async (res) => {
               if (!res.ok) throw new Error("Server responded with error status");
               console.log("✅ Sync Done: Data pushed to server.");
               localStorage.removeItem("inventory_has_local_only_changes");
+              setIsOnline(true);
             }).catch(async (err) => {
               console.warn("⚠️ Network Failed: Queuing data for offline sync...", err);
               await offlineService.queueOperation(syncPayload);
               const ops = await offlineService.getPendingOperations();
               setPendingSyncCount(ops.length);
-              showToast("⚠️ انقطع الاتصال: تم حفظ التعديلات محلياً وسيتم رفعها عند عودة الشبكة.", "info");
+              setIsOnline(false);
             });
           }, 10000);
         }
@@ -1273,12 +1318,38 @@ export default function App() {
           // Check if active input focus exists in a quantity field
           const activeEl = document.activeElement;
           const isEditingQty = activeEl && activeEl.tagName === "INPUT" && activeEl.getAttribute("type") === "number";
+          const activeItemIdMatch = activeEl?.id?.match(/(?:qty-input|input-qty)-(.+)/);
+          const activeItemId = activeItemIdMatch ? activeItemIdMatch[1] : null;
 
           // Intelligently merge local unsubmitted quantities with server's active session state in a local-first offline manner
           let mergedActiveSession = sActiveClean;
           if (localActive && String(localActive.id) === String(sActiveClean.id)) {
             const mergedItems = sActiveClean.items.map((sItem: any) => {
               const localItem = localActive.items?.find((i: any) => String(i.itemId) === String(sItem.itemId));
+              
+              // CRITICAL: If this item is currently being edited in the calculator OR is the active focused input,
+              // we MUST preserve its local quantities and calculatorDetails to prevent numbers from jumping/flickering!
+              const isItemCurrentlyBeingEdited = 
+                (calcItem && String(calcItem.itemId) === String(sItem.itemId)) ||
+                (isEditingQty && activeItemId && String(activeItemId) === String(sItem.itemId));
+
+              if (isItemCurrentlyBeingEdited && localItem) {
+                return {
+                  ...sItem,
+                  physicalQty: localItem.physicalQty,
+                  storekeeperQty: localItem.storekeeperQty !== undefined ? localItem.storekeeperQty : sItem.storekeeperQty,
+                  supervisorQty: localItem.supervisorQty !== undefined ? localItem.supervisorQty : sItem.supervisorQty,
+                  managerQty: localItem.managerQty !== undefined ? localItem.managerQty : sItem.managerQty,
+                  calculatorDetails: localItem.calculatorDetails !== undefined ? localItem.calculatorDetails : sItem.calculatorDetails,
+                  inventoriedByCode: localItem.inventoriedByCode || sItem.inventoriedByCode,
+                  inventoriedByName: localItem.inventoriedByName || sItem.inventoriedByName,
+                  inventoriedAt: localItem.inventoriedAt || sItem.inventoriedAt,
+                  assignedTo: localItem.assignedTo || sItem.assignedTo,
+                  submitted: localItem.submitted !== undefined ? localItem.submitted : sItem.submitted,
+                  submittedAt: localItem.submittedAt || sItem.submittedAt,
+                };
+              }
+
               if (localItem) {
                 const sQty = sItem.physicalQty;
                 const lQty = localItem.physicalQty;
@@ -1310,22 +1381,33 @@ export default function App() {
             mergedActiveSession = { ...sActiveClean, items: mergedItems };
           }
 
-          if (!isEditingQty || forceUpdate) {
+          if ((!isEditingQty && !calcItem) || forceUpdate) {
             setActiveSession(mergedActiveSession);
             localStorage.setItem("inventory_active_session", JSON.stringify(mergedActiveSession));
           } else {
-            // Merge with current in-memory React state (if user is currently typing in input)
+            // Merge with current in-memory React state (if user is currently typing in input or has calculator open)
             setActiveSession((prev) => {
               if (!prev) return mergedActiveSession;
               const mergedItems = mergedActiveSession.items.map((sItem: any) => {
                 const prevItem = prev.items.find((i) => i.itemId === sItem.itemId);
-                const isCurrentTarget = activeEl && (activeEl.id === `qty-input-${sItem.itemId}` || activeEl.id === `input-qty-${sItem.itemId}`);
+                const isCurrentTarget = 
+                  (activeEl && (activeEl.id === `qty-input-${sItem.itemId}` || activeEl.id === `input-qty-${sItem.itemId}`)) ||
+                  (calcItem && calcItem.itemId === sItem.itemId);
                 if (isCurrentTarget && prevItem) {
-                  return { ...sItem, physicalQty: prevItem.physicalQty };
+                  return { 
+                    ...sItem, 
+                    physicalQty: prevItem.physicalQty,
+                    storekeeperQty: prevItem.storekeeperQty,
+                    supervisorQty: prevItem.supervisorQty,
+                    managerQty: prevItem.managerQty,
+                    calculatorDetails: prevItem.calculatorDetails,
+                  };
                 }
                 return sItem;
               });
-              return { ...mergedActiveSession, items: mergedItems };
+              const updatedSess = { ...mergedActiveSession, items: mergedItems };
+              localStorage.setItem("inventory_active_session", JSON.stringify(updatedSess));
+              return updatedSess;
             });
           }
         }
@@ -1377,9 +1459,13 @@ export default function App() {
   };
 
   // Helper to pull from server & update states safely
-  const fetchStateFromServer = async (forceUpdate = false) => {
+  const fetchStateFromServer = async (forceUpdate = false, showLoader = false) => {
     if (isArchiving) return;
-    if (forceUpdate) {
+    if (isSyncingOfflineRef.current) {
+      console.log("🛡️ fetchStateFromServer bypassed: currently processing offline queue.");
+      return;
+    }
+    if (forceUpdate && showLoader) {
       setIsDataLoaded(false);
     }
     try {
@@ -1394,18 +1480,20 @@ export default function App() {
         return;
       }
 
-      const res = await fetch("/api/data", {
+      const res = await fetchWithTimeout("/api/data", {
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${token}`
         }
-      });
+      }, 10000);
       
       const contentType = res.headers.get("content-type");
       if (!contentType || !contentType.includes("application/json")) {
         const text = await res.text();
         throw new Error(`Server returned non-JSON response: ${text.slice(0, 100)}`);
       }
+
+      setIsOnline(true);
 
       if (res.status === 401 || res.status === 403) {
         console.warn("Session expired or invalid. Logging out...");
@@ -1428,6 +1516,7 @@ export default function App() {
       }
     } catch (err) {
       console.warn("Failed fetching metadata from central server:", err);
+      setIsOnline(false);
       isSyncingRef.current = false;
       // Assume local storage is enough if server fetch fails
       setIsDataLoaded(true);
@@ -1486,7 +1575,7 @@ export default function App() {
   // Trigger loading from server on startup/routing
   useEffect(() => {
     fetchUsersFromServer();
-    fetchStateFromServer(true);
+    fetchStateFromServer(true, true);
   }, [user]);
 
   // Fetch activity logs (Admin only)
@@ -1574,7 +1663,7 @@ export default function App() {
       if (result.status === "ok") {
         showToast("🎉 تم استرجاع نسخة الجرد المحذوفة بنجاح تام!", "success");
         await fetchDeletedSessions();
-        await fetchStateFromServer(true);
+        await fetchStateFromServer(true, true);
         await performCloudSync(true, true);
       } else {
         showToast(result.error || "فشل استرجاع الجلسة.", "error");
@@ -1708,7 +1797,7 @@ export default function App() {
       if (res.ok) {
         showToast("🎉 تم استعادة البيانات وإعادة مزامنة كافة يوزرات وأصناف الجرد الحية بنجاح!", "success");
         updateFirestoreUsage('reads', 5, "استعادة نسخة احتياطية سحابية");
-        fetchStateFromServer(true);
+        fetchStateFromServer(true, true);
         setIsShowingRestoreConfirm(false);
       } else {
         showToast(result.error || "⚠️ فشل في عملية الاستعادة السحابية للبيانات.", "error");
@@ -1785,6 +1874,17 @@ export default function App() {
     const connectWebSocket = () => {
       if (typeof window === "undefined") return;
 
+      // Clear any existing timeout to avoid duplicate connections
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+      }
+
+      // Check if already connected or connecting
+      if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
+
       const token = localStorage.getItem("inventory_jwt_token");
       if (!token) {
         setIsWsSynced(false);
@@ -1807,6 +1907,14 @@ export default function App() {
       ws.onmessage = async (event) => {
         try {
           const payload = JSON.parse(event.data);
+          
+          // 🛡️ BACKGROUND SYNC SHIELD: Ignore live websocket updates while we are processing the offline queue.
+          // This keeps the local UI stable and prevents intermediate server states from reverting/flickering quantities!
+          if (isSyncingOfflineRef.current) {
+            console.log(`WebSocket: Ignored ${payload.type} message during offline queue sync to protect UI stability.`);
+            return;
+          }
+
           if (payload.type === "SYNC_INITIAL") {
             const serverData = payload.data;
             if (serverData) {
@@ -1871,14 +1979,31 @@ export default function App() {
 
       ws.onerror = (err) => {
         // Log as a silent warning to prevent AI Studio from capturing this as a critical failure
-        console.warn("WebSocket client connection closed or could not connect. Reconnect is handled automatically.");
+        console.warn("WebSocket client connection error. Reconnect is handled automatically.");
         ws.close();
       };
     };
 
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        console.log("📄 Tab became visible. Checking WebSocket connection...");
+        connectWebSocket();
+      }
+    };
+
+    const handleFocus = () => {
+      console.log("🎯 Window focused. Checking WebSocket connection...");
+      connectWebSocket();
+    };
+
+    window.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleFocus);
+
     connectWebSocket();
 
     return () => {
+      window.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleFocus);
       if (socket) {
         socket.close();
       }
@@ -2092,7 +2217,7 @@ export default function App() {
 
         // Fetch state now that we have authenticated
         setTimeout(() => {
-          fetchStateFromServer(true);
+          fetchStateFromServer(true, true);
         }, 50);
 
         showToast(`أهلاً بك مجدداً يا ${loggedUser.name}. تم تسجيل الدخول بنجاح.`, "success");
@@ -2194,7 +2319,7 @@ export default function App() {
 
           // Fetch state now that we have authenticated
           setTimeout(() => {
-            fetchStateFromServer(true);
+            fetchStateFromServer(true, true);
           }, 50);
 
           // Clear precode workflow states
@@ -5599,7 +5724,7 @@ export default function App() {
             onImportActiveSession={(session) => {
               setActiveSession(session);
               localStorage.setItem("inventory_active_session", JSON.stringify(session));
-              fetchStateFromServer(true);
+              fetchStateFromServer(true, true);
             }}
             onClose={() => setIsShowingMirror(false)} 
             onSync={() => {
@@ -5607,7 +5732,7 @@ export default function App() {
               setMasterItems([]);
               setActiveSession(null);
               localStorage.removeItem("inventory_active_session");
-              fetchStateFromServer(true);
+              fetchStateFromServer(true, true);
             }}
           />
         )}
@@ -7739,8 +7864,26 @@ export default function App() {
                   <Calendar className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-slate-800 text-[12px] sm:text-sm">
-                    تقرير جرد يوم : {new Date(inspectSession.date).toLocaleDateString("ar-EG", { year: "numeric", month: "short", day: "numeric" })}
+                  <h3 className="font-bold text-slate-800 text-[12px] sm:text-sm flex items-center gap-2">
+                    <span>تقرير جرد يوم :</span>
+                    {isEditingInspectSession && user?.role === 'program_manager' ? (
+                      <input
+                        type="date"
+                        value={new Date(inspectSession.date).toISOString().split('T')[0]}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (val) {
+                            const newDate = new Date(val).toISOString();
+                            setInspectSession({ ...inspectSession, date: newDate });
+                          }
+                        }}
+                        className="px-2 py-1 border border-indigo-200 rounded-lg text-xs font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white shadow-sm"
+                      />
+                    ) : (
+                      <span className="text-indigo-700">
+                        {new Date(inspectSession.date).toLocaleDateString("ar-EG", { year: "numeric", month: "short", day: "numeric" })}
+                      </span>
+                    )}
                   </h3>
                   <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 mt-1.5">
                     <span className="text-[9px] font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100/50 inline-flex items-center gap-1 whitespace-nowrap self-start">
@@ -8672,7 +8815,7 @@ export default function App() {
           onImportActiveSession={(session) => {
             setActiveSession(session);
             localStorage.setItem("inventory_active_session", JSON.stringify(session));
-            fetchStateFromServer(true);
+            fetchStateFromServer(true, true);
           }}
           onClose={() => setIsShowingMirror(false)} 
           onSync={() => {
@@ -8687,7 +8830,7 @@ export default function App() {
             localStorage.removeItem("inventory_has_pending_assignments");
             localStorage.removeItem("inventory_has_local_only_changes");
             localStorage.setItem("inventory_last_updated", "0");
-            fetchStateFromServer(true);
+            fetchStateFromServer(true, true);
           }}
         />
       )}

@@ -1039,18 +1039,37 @@ export default function StoresManagerDashboard({
       const isSupervisorCorrection = supervisorVal !== null && supervisorVal !== storekeeperVal;
 
       // Find manager corrections
-      const session = filteredData.sessions.find(s => s.id === item.sessionId);
       const skMods = getStorekeeperModifications(item);
       const storekeeperModCount = skMods.length;
       const supervisorModCount = (supervisorVal !== null && supervisorVal !== storekeeperVal) ? 1 : 0;
 
-      const preManagerQtyForCount = supervisorVal !== null ? supervisorVal : storekeeperVal;
-      
-      let managerModCount = 0;
-      let lastValForManager = preManagerQtyForCount;
+      const sessionArchiveModifications = (item.sessionModifications || []).map((mod: any) => {
+        const itemChange = mod.itemChanges?.find((change: any) => {
+          const cId = String(change.id || change.itemId || change.itemCode || "").trim();
+          const currentId = String(item.id || item.itemId || item.itemCode || "").trim();
+          const cName = String(change.name || change.itemName || "").trim().toLowerCase();
+          const currentName = String(item.name || item.itemName || "").trim().toLowerCase();
+          return (cId && cId === currentId) || (cName && cName === currentName);
+        });
 
-      if (session && session.modifications) {
-        const itemMods = session.modifications.filter((mod: any) => {
+        if (!itemChange) return null;
+        
+        const physNew = itemChange.newPhysicalQty !== undefined ? itemChange.newPhysicalQty : itemChange.newQty;
+        const physOld = itemChange.oldPhysicalQty !== undefined ? itemChange.oldPhysicalQty : itemChange.oldQty;
+        const superNew = itemChange.newSupervisorQty;
+        const superOld = itemChange.oldSupervisorQty;
+
+        const isPhysChanged = physNew !== undefined && physNew !== physOld;
+        const isSuperChanged = superNew !== undefined && superNew !== superOld;
+
+        if (!isPhysChanged && !isSuperChanged && physNew === undefined) return null;
+
+        return itemChange;
+      }).filter(Boolean);
+
+      let qtyAtArchiveForCount = managerVal;
+      if (sessionArchiveModifications.length > 0) {
+        const sortedModsForArch = (item.sessionModifications || []).filter((mod: any) => {
           return mod.itemChanges?.some((change: any) => {
             const cId = String(change.id || change.itemId || change.itemCode || "").trim();
             const currentId = String(item.id || item.itemId || item.itemCode || "").trim();
@@ -1058,28 +1077,26 @@ export default function StoresManagerDashboard({
             const currentName = String(item.name || item.itemName || "").trim().toLowerCase();
             return (cId && cId === currentId) || (cName && cName === currentName);
           });
-        });
+        }).sort((a: any, b: any) => new Date(a.modifiedAt || a.timestamp || 0).getTime() - new Date(b.modifiedAt || b.timestamp || 0).getTime());
         
-        const sortedMods = itemMods.sort((a: any, b: any) => new Date(a.modifiedAt || a.timestamp || 0).getTime() - new Date(b.modifiedAt || b.timestamp || 0).getTime());
-        
-        sortedMods.forEach((mod: any) => {
-          const change = mod.itemChanges?.find((c: any) => {
+        if (sortedModsForArch.length > 0) {
+          const firstMod = sortedModsForArch[0];
+          const itemChange = firstMod.itemChanges?.find((c: any) => {
             const cId = String(c.id || c.itemId || c.itemCode || "").trim();
             const currentId = String(item.id || item.itemId || item.itemCode || "").trim();
             const cName = String(c.name || c.itemName || "").trim().toLowerCase();
             const currentName = String(item.name || item.itemName || "").trim().toLowerCase();
             return (cId && cId === currentId) || (cName && cName === currentName);
           });
-          if (change) {
-            managerModCount += 1;
-            lastValForManager = (change.newPhysicalQty !== undefined ? change.newPhysicalQty : (change.newQty ?? 0));
+          if (itemChange) {
+            qtyAtArchiveForCount = itemChange.oldPhysicalQty !== undefined ? itemChange.oldPhysicalQty : itemChange.oldQty;
           }
-        });
+        }
       }
 
-      if (managerVal !== null && lastValForManager !== null && managerVal !== lastValForManager) {
-        managerModCount += 1;
-      }
+      const preManagerQtyForCount = supervisorVal !== null ? supervisorVal : storekeeperVal;
+      const isManagerActiveSessionCorrection = qtyAtArchiveForCount !== null && preManagerQtyForCount !== null && qtyAtArchiveForCount !== preManagerQtyForCount;
+      const managerModCount = sessionArchiveModifications.length + (isManagerActiveSessionCorrection ? 1 : 0);
 
       if (!grouped.has(code)) {
         grouped.set(code, {
@@ -1241,11 +1258,11 @@ export default function StoresManagerDashboard({
             totalSessionsApproved: 0,
             totalItemsVerified: 0,
             recountsPerformed: 0,
+            recountCorrections: 0,
             totalSupervisorCorrections: 0,
             totalCorrectionQty: 0,
             perfectBookMatches: 0,
             totalStorekeeperModifications: 0,
-            totalSupervisorCorrections: 0,
             totalManagerCorrections: 0,
             totalOverageQty: 0,
             totalShortageQty: 0,
@@ -1297,10 +1314,13 @@ export default function StoresManagerDashboard({
           );
           
           const isSupervisorCorrection = supervisorVal !== null && supervisorVal !== skVal;
+          if (isSupervisorCorrection) {
+            sup.recountCorrections += 1;
+          }
           const skMods = getStorekeeperModifications(item);
           const storekeeperModCount = skMods.length;
           const supervisorModCount = isSupervisorCorrection ? 1 : 0;
-          
+
           const itemMods = (session && session.modifications) ? session.modifications.filter((mod: any) => {
             return mod.itemChanges?.some((change: any) => {
               const cId = String(change.id || change.itemId || change.itemCode || "").trim();
@@ -1311,36 +1331,29 @@ export default function StoresManagerDashboard({
             });
           }) : [];
           
-          const lastValForManager = supervisorVal !== null ? supervisorVal : skVal;
-          const isManagerActiveSessionCorrection = (managerVal !== null && lastValForManager !== null && managerVal !== lastValForManager);
-          
-          // Count manager modifications: 
-          // 1. Modifications in session (itemMods)
-          // 2. Active session correction by manager if managerVal differs from lastValForManager
-          // We must be careful not to double count if the last mod in itemMods ALREADY resulted in the current managerVal.
-          
-          let managerModCount = itemMods.length;
-          
-          // Check if the last modification in itemMods already matches managerVal
-          const sortedMods = itemMods.sort((a: any, b: any) => new Date(a.modifiedAt || a.timestamp || 0).getTime() - new Date(b.modifiedAt || b.timestamp || 0).getTime());
-          
-          let lastModVal = lastValForManager;
-          if (sortedMods.length > 0) {
-            const lastMod = sortedMods[sortedMods.length - 1];
-            const change = lastMod.itemChanges?.find((c: any) => {
+          const preManagerQtyForCount = supervisorVal !== null ? supervisorVal : skVal;
+          let qtyAtArchiveForCount = managerVal;
+          let managerModCount = 0;
+
+          if (itemMods.length > 0) {
+            const sortedMods = itemMods.sort((a: any, b: any) => new Date(a.modifiedAt || a.timestamp || 0).getTime() - new Date(b.modifiedAt || b.timestamp || 0).getTime());
+            const firstMod = sortedMods[0];
+            const itemChange = firstMod.itemChanges?.find((c: any) => {
                 const cId = String(c.id || c.itemId || c.itemCode || "").trim();
                 const currentId = String(item.id || item.itemId || item.itemCode || "").trim();
                 const cName = String(c.name || c.itemName || "").trim().toLowerCase();
                 const currentName = String(item.name || item.itemName || "").trim().toLowerCase();
                 return (cId && cId === currentId) || (cName && cName === currentName);
             });
-            if (change) {
-                lastModVal = (change.newPhysicalQty !== undefined ? change.newPhysicalQty : (change.newQty ?? 0));
+            if (itemChange) {
+                qtyAtArchiveForCount = itemChange.oldPhysicalQty !== undefined ? itemChange.oldPhysicalQty : itemChange.oldQty;
             }
           }
           
-          if (managerVal !== null && managerVal !== lastModVal) {
-            managerModCount += 1;
+          const isManagerActiveSessionCorrection = qtyAtArchiveForCount !== null && preManagerQtyForCount !== null && qtyAtArchiveForCount !== preManagerQtyForCount;
+          const hasManagerCorrection = (itemMods.length > 0) || isManagerActiveSessionCorrection;
+          if (hasManagerCorrection) {
+            managerModCount = itemMods.length + (isManagerActiveSessionCorrection ? 1 : 0);
           }
 
           sup.totalManagerCorrections += managerModCount;
@@ -1461,59 +1474,135 @@ export default function StoresManagerDashboard({
         : (item.physicalQty !== null && item.physicalQty !== undefined ? item.physicalQty : null);
       
       const supervisorVal = item.supervisorQty !== undefined && item.supervisorQty !== null ? item.supervisorQty : null;
+      const managerVal = item.managerQty !== undefined && item.managerQty !== null ? item.managerQty : null;
 
-      const physical = supervisorVal !== null 
-        ? supervisorVal 
-        : (skVal !== null ? skVal : (item.physicalQty || 0));
-      
-      const diff = physical - book;
       const dStr = item.sessionDate;
       const sessionName = item.sessionName || "unknown";
       const groupKey = `${dStr}_${sessionName}`;
 
-      // Daily Timeline aggregation (Granularity: Days and Sessions)
+      const skMods = getStorekeeperModifications(item);
+      const storekeeperModCount = skMods.length;
+      const supervisorModCount = (supervisorVal !== null && supervisorVal !== skVal) ? 1 : 0;
+
+      const sessionArchiveModifications = (item.sessionModifications || []).map((mod: any) => {
+        const itemChange = mod.itemChanges?.find((change: any) => {
+          const cId = String(change.id || change.itemId || change.itemCode || "").trim();
+          const currentId = String(item.id || item.itemId || item.itemCode || "").trim();
+          const cName = String(change.name || change.itemName || "").trim().toLowerCase();
+          const currentName = String(item.name || item.itemName || "").trim().toLowerCase();
+          return (cId && cId === currentId) || (cName && cName === currentName);
+        });
+
+        if (!itemChange) return null;
+        
+        const physNew = itemChange.newPhysicalQty !== undefined ? itemChange.newPhysicalQty : itemChange.newQty;
+        const physOld = itemChange.oldPhysicalQty !== undefined ? itemChange.oldPhysicalQty : itemChange.oldQty;
+        const superNew = itemChange.newSupervisorQty;
+        const superOld = itemChange.oldSupervisorQty;
+
+        const isPhysChanged = physNew !== undefined && physNew !== physOld;
+        const isSuperChanged = superNew !== undefined && superNew !== superOld;
+
+        if (!isPhysChanged && !isSuperChanged && physNew === undefined) return null;
+
+        return itemChange;
+      }).filter(Boolean);
+
+      let qtyAtArchiveForCount = managerVal;
+      if (sessionArchiveModifications.length > 0) {
+        const sortedModsForArch = (item.sessionModifications || []).filter((mod: any) => {
+          return mod.itemChanges?.some((change: any) => {
+            const cId = String(change.id || change.itemId || change.itemCode || "").trim();
+            const currentId = String(item.id || item.itemId || item.itemCode || "").trim();
+            const cName = String(change.name || change.itemName || "").trim().toLowerCase();
+            const currentName = String(item.name || item.itemName || "").trim().toLowerCase();
+            return (cId && cId === currentId) || (cName && cName === currentName);
+          });
+        }).sort((a: any, b: any) => new Date(a.modifiedAt || a.timestamp || 0).getTime() - new Date(b.modifiedAt || b.timestamp || 0).getTime());
+        
+        if (sortedModsForArch.length > 0) {
+          const firstMod = sortedModsForArch[0];
+          const itemChange = firstMod.itemChanges?.find((c: any) => {
+            const cId = String(c.id || c.itemId || c.itemCode || "").trim();
+            const currentId = String(item.id || item.itemId || item.itemCode || "").trim();
+            const cName = String(c.name || c.itemName || "").trim().toLowerCase();
+            const currentName = String(item.name || item.itemName || "").trim().toLowerCase();
+            return (cId && cId === currentId) || (cName && cName === currentName);
+          });
+          if (itemChange) {
+            qtyAtArchiveForCount = itemChange.oldPhysicalQty !== undefined ? itemChange.oldPhysicalQty : itemChange.oldQty;
+          }
+        }
+      }
+
+      const preManagerQtyForCount = supervisorVal !== null ? supervisorVal : skVal;
+      const isManagerActiveSessionCorrection = qtyAtArchiveForCount !== null && preManagerQtyForCount !== null && qtyAtArchiveForCount !== preManagerQtyForCount;
+      const managerModCount = sessionArchiveModifications.length + (isManagerActiveSessionCorrection ? 1 : 0);
+
       if (!timelineMap.has(groupKey)) {
+        // Find session index for version numbering
+        const sessionIdx = [...pastSessions]
+          .sort((a, b) => new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime())
+          .findIndex(s => s.id === item.sessionId);
+
         timelineMap.set(groupKey, {
           id: groupKey,
           date: dStr,
+          sessionId: item.sessionId,
+          versionNumber: sessionIdx !== -1 ? sessionIdx + 1 : 1,
           sessionName: sessionName !== "unknown" ? sessionName : undefined,
-          count: 0,
-          discrepancyCount: 0,
-          variance: 0,
-          net: 0,
-          itemsList: []
+          totalAssigned: 0,
+          totalSubmitted: 0,
+          recheckedItemsCount: 0,
+          totalStorekeeperModifications: 0,
+          totalSupervisorCorrections: 0,
+          totalManagerCorrections: 0,
+          perfectMatches: 0
         });
       }
-      const timeStat = timelineMap.get(groupKey);
-      timeStat.count += 1;
-      timeStat.variance += Math.abs(diff);
-      if (diff !== 0) timeStat.discrepancyCount += 1;
-      timeStat.net += diff;
       
-      timeStat.itemsList.push({
-        itemId: item.itemId || item.id,
-        name: item.name || item.itemName || "صنف غير معروف",
-        book,
-        physical,
-        diff,
-        auditor: allUsers.find(u => String(u.code) === String(item.assignedTo))?.name || `أمين (${item.assignedTo || "عام"})`
-      });
+      const timeStat = timelineMap.get(groupKey);
+      timeStat.totalAssigned += 1;
+      
+      if (item.submitted || skVal !== null) {
+        timeStat.totalSubmitted += 1;
+      }
+
+      const isRechecked = storekeeperModCount > 0 || supervisorVal !== null || managerVal !== null;
+      if (isRechecked) {
+        timeStat.recheckedItemsCount += 1;
+      }
+
+      timeStat.totalStorekeeperModifications += storekeeperModCount;
+      timeStat.totalSupervisorCorrections += supervisorModCount;
+      timeStat.totalManagerCorrections += managerModCount;
+
+      if (skVal !== null && skVal === book) {
+        timeStat.perfectMatches += 1;
+      }
     });
 
     const timelineList = Array.from(timelineMap.values()).map(time => {
-      // Sort timeline items by size of discrepancy
-      time.itemsList.sort((a: any, b: any) => Math.abs(b.diff) - Math.abs(a.diff));
-      return time;
+      const totalEvaluated = time.totalSubmitted;
+      const uniqueItemsWithCorrections = time.recheckedItemsCount;
+      const recountMatchRate = totalEvaluated > 0
+        ? Math.max(0, Math.round(((totalEvaluated - uniqueItemsWithCorrections) / totalEvaluated) * 100))
+        : 100;
+
+      return {
+        ...time,
+        recountMatchRate
+      };
     }).sort((a, b) => {
       const dateCmp = b.date.localeCompare(a.date);
       if (dateCmp !== 0) return dateCmp;
       return (b.sessionName || "").localeCompare(a.sessionName || "");
-    }); // Descending chronological (latest days first)
+    });
 
     return {
       timeline: timelineList
     };
-  }, [filteredData]);
+  }, [filteredData, allUsers]);
 
   // Reset Filters
   const handleClearFilters = () => {
@@ -2281,7 +2370,7 @@ export default function StoresManagerDashboard({
                                   <AnimatePresence initial={false}>
                                     {isExpanded && (
                                       <tr>
-                                        <td colSpan={13} className="bg-slate-50/75 p-0 border-b border-slate-150">
+                                        <td colSpan={11} className="bg-slate-50/75 p-0 border-b border-slate-150">
                                         <motion.div
                                           initial={{ height: 0, opacity: 0 }}
                                           animate={{ height: "auto", opacity: 1 }}
@@ -2297,9 +2386,9 @@ export default function StoresManagerDashboard({
                                             {auditor.dailyHistory.map((day: any, hidx: number) => (
                                               <div 
                                                 key={hidx} 
-                                                className="bg-white px-4 py-2 rounded-lg border border-slate-150 flex items-center justify-between text-[11px] hover:bg-slate-50/50 transition-colors"
+                                                className="bg-white px-4 py-3 rounded-lg border border-slate-150 flex flex-row items-center justify-between gap-4 text-[11px] hover:bg-slate-50/50 transition-colors w-full overflow-x-auto scrollbar-none"
                                               >
-                                                <div className="flex items-center gap-4">
+                                                <div className="flex flex-row items-center gap-4 shrink-0">
                                                   {/* Right Part: Date & Session */}
                                                   <div className="flex items-center gap-3 min-w-[130px] shrink-0">
                                                     <span className="font-mono text-[10.5px] text-indigo-950 font-black flex items-center gap-1">
@@ -2326,7 +2415,7 @@ export default function StoresManagerDashboard({
                                                       {day.rechecksCount > 0 ? (
                                                         <div className="flex flex-col gap-0.5">
                                                           <span className="bg-rose-50 text-rose-700 px-2 py-0.5 rounded text-[9px] font-black border border-rose-100 whitespace-nowrap self-start">
-                                                            تمت اعادة جرد {day.rechecksCount} صنف باجمالي تعديلات {day.totalStorekeeperModifications + day.totalSupervisorCorrections + day.totalManagerCorrections} صنف
+                                                            تمت اعادة جرد {day.rechecksCount} صنف باجمالي تعديلات {day.totalStorekeeperModifications + day.totalSupervisorCorrections + day.totalManagerCorrections} تعديل
                                                           </span>
                                                         </div>
                                                       ) : (
@@ -2339,7 +2428,7 @@ export default function StoresManagerDashboard({
                                                 </div>
 
                                                 {/* Left Part: Stats */}
-                                                <div className="flex items-center gap-4 text-slate-500 font-medium shrink-0">
+                                                <div className="flex flex-row items-center gap-4 text-slate-500 font-medium shrink-0">
                                                   <div className="w-16 text-center">
                                                     <div className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">الأصناف المجرودة</div>
                                                     <div className="font-mono font-black text-[10px] text-slate-700">{day.totalItems}</div>
@@ -2493,7 +2582,7 @@ export default function StoresManagerDashboard({
                                 <AnimatePresence initial={false}>
                                   {isExpanded && (
                                     <tr>
-                                      <td colSpan={10} className="bg-slate-50/75 p-0 border-b border-slate-150">
+                                      <td colSpan={11} className="bg-slate-50/75 p-0 border-b border-slate-150">
                                         <motion.div
                                           initial={{ height: 0, opacity: 0 }}
                                           animate={{ height: "auto", opacity: 1 }}
@@ -2509,9 +2598,9 @@ export default function StoresManagerDashboard({
                                             {sup.dailyHistory.map((day: any, hidx: number) => (
                                               <div 
                                                 key={hidx} 
-                                                className="bg-white px-4 py-2 rounded-lg border border-slate-150 flex items-center justify-between text-[11px] hover:bg-slate-50/50 transition-colors"
+                                                className="bg-white px-4 py-3 rounded-lg border border-slate-150 flex flex-row items-center justify-between gap-4 text-[11px] hover:bg-slate-50/50 transition-colors w-full overflow-x-auto scrollbar-none"
                                               >
-                                                <div className="flex items-center gap-4">
+                                                <div className="flex flex-row items-center gap-4 shrink-0">
                                                   {/* Right Part: Date & Session */}
                                                   <div className="flex items-center gap-3 min-w-[130px] shrink-0">
                                                     <span className="font-mono text-[10.5px] text-indigo-950 font-black flex items-center gap-1">
@@ -2538,20 +2627,8 @@ export default function StoresManagerDashboard({
                                                       {day.recountsCount > 0 ? (
                                                         <div className="flex flex-col gap-0.5">
                                                           <span className="bg-amber-50 text-amber-700 px-2 py-0.5 rounded text-[9px] font-black border border-amber-100 whitespace-nowrap">
-                                                            تمت اعادة جرد {day.recountsCount} صنف باجمالي تعديلات {day.totalStorekeeperModifications + day.totalSupervisorCorrections + day.totalManagerCorrections}
+                                                            تمت اعادة جرد {day.recountsCount} صنف باجمالي تعديلات {day.totalStorekeeperModifications + day.totalSupervisorCorrections + day.totalManagerCorrections} تعديل
                                                           </span>
-                                                          {/* Detailed supervisor mods if available (Show only supervisor mods as per user request) */}
-                                                          {day.totalSupervisorCorrections > 0 && (
-                                                            <div className="flex flex-wrap gap-1 max-w-[300px]">
-                                                              {sup.history
-                                                                .filter((h: any) => h.date === day.date && h.sessionName === day.sessionName && h.totalSupervisorCorrections > 0)
-                                                                .map((h: any, midx: number) => (
-                                                                  <span key={midx} className="bg-indigo-50 text-indigo-700 border border-indigo-100 px-1 rounded text-[7px] font-bold">
-                                                                    {h.storekeeper} ➔ {h.supervisor}
-                                                                  </span>
-                                                                ))}
-                                                            </div>
-                                                          )}
                                                         </div>
                                                       ) : (
                                                         <span className="bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded text-[9px] font-bold border border-emerald-100 whitespace-nowrap">
@@ -2563,7 +2640,7 @@ export default function StoresManagerDashboard({
                                                 </div>
 
                                                 {/* Left Part: Stats */}
-                                                <div className="flex items-center gap-4 text-slate-500 font-medium shrink-0">
+                                                <div className="flex flex-row items-center gap-4 text-slate-500 font-medium shrink-0">
                                                   <div className="w-16 text-center">
                                                     <div className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">الأصناف المدققة</div>
                                                     <div className="font-mono font-black text-[10px] text-slate-700">{day.totalItems}</div>
@@ -2609,125 +2686,102 @@ export default function StoresManagerDashboard({
             </motion.div>
           )}
 
-          {/* TAB 3: Category Breakdowns & Daily Timeline with inline expansion */}
+          {/* TAB 3: General Review (Date & Session level with all performance columns, flat and clean) */}
           {activeSubTab === "general" && (
             <motion.div
               key="general_tab"
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -10 }}
-              className="space-y-8"
+              className="space-y-6"
             >
-              {/* Daily Timeline breakdown with Expandable Items (CRITICAL USER REQUEST) */}
-              <div className="space-y-4">
-                <div className="border-b border-slate-100 pb-2">
-                  <h3 className="text-sm font-black text-slate-800">جدولة ومراجعة الجرد التفصيلي اليومي (Daily Timeline)</h3>
-                  <p className="text-[10px] text-slate-400 font-bold mt-0.5">💡 اضغط على التاريخ لتوسيع الأصناف والعمليات المجرودة في هذا اليوم بالتفصيل</p>
-                </div>
+              {/* Header section */}
+              <div className="border-b border-slate-100 pb-2">
+                <h3 className="text-sm font-black text-slate-800">المراجعة العامة والجدولة التفصيلية اليومية</h3>
+                <p className="text-[10px] text-slate-400 font-bold mt-0.5">📊 تقرير إحصائي موحد على مستوى تاريخ الوردية ونسخ الجرد دون تفاصيل فرعية للأصناف.</p>
+              </div>
 
-                <div className="w-full overflow-x-auto scrollbar-thin border border-slate-200 rounded-2xl bg-white shadow-2xs">
-                  <table className="w-full text-right text-[11px] font-sans border-collapse min-w-[700px]">
-                    <thead>
-                      <tr className="bg-slate-50 border-b border-slate-150 text-slate-600 font-black h-11">
-                        <th className="pr-4 py-2 w-10 text-center"></th>
-                        <th className="px-3 py-2 w-32">تاريخ اليوم المجرود</th>
-                        <th className="px-3 py-2 w-32 text-center">عمليات الفحص اليومية</th>
-                        <th className="px-3 py-2 w-32 text-center">الانحرافات المكتشفة</th>
-                        <th className="px-3 py-2 w-32 text-center">إجمالي فارق الكمية اليومي</th>
-                        <th className="pl-4 py-2 text-center">الرصد الإحصائي العام</th>
+              <div className="w-full overflow-x-auto scrollbar-thin border border-slate-200 rounded-2xl bg-white shadow-2xs">
+                <table className="w-full text-right text-[11px] font-sans border-collapse min-w-[850px]">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-150 text-slate-600 font-black h-11">
+                      <th className="pr-4 py-2 w-44 whitespace-nowrap">تاريخ الجرد</th>
+                      <th className="px-3 py-2 min-w-[220px]">نسخة الجرد</th>
+                      <th className="px-3 py-2 w-32 text-center">الأصناف المسندة</th>
+                      <th className="px-3 py-2 w-32 text-center">أصناف تم جردها</th>
+                      <th className="px-3 py-2 w-32 text-center">تعديلات الأمين</th>
+                      <th className="px-3 py-2 w-32 text-center">تعديلات المشرفين</th>
+                      <th className="px-3 py-2 w-32 text-center">تعديلات المسؤول</th>
+                      <th className="px-3 py-2 w-32 text-center">إجمالي التعديلات</th>
+                      <th className="pl-4 py-2 w-40 text-center">معامل مطابقة الجرد</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {generalDashboardData.timeline.length === 0 ? (
+                      <tr>
+                        <td colSpan={9} className="text-center py-12 text-slate-400 font-bold">لا توجد سجلات جرد أو بيانات مطابقة لهذه الفترة</td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {generalDashboardData.timeline.map(time => {
-                        const isExpanded = expandedTimelineDates.includes(time.id);
-                        return (
-                          <React.Fragment key={time.id}>
-                            <tr 
-                              onClick={() => toggleTimelineExpand(time.id)}
-                              className={`border-b border-slate-100 hover:bg-slate-50/80 cursor-pointer transition-colors h-12 ${
-                                isExpanded ? "bg-indigo-50/30 font-extrabold" : ""
-                              }`}
-                            >
-                              <td className="pr-4 py-2 text-center text-slate-400">
-                                {isExpanded ? <ChevronUp className="w-4 h-4 text-indigo-600" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
-                              </td>
-                              <td className="px-3 py-2 text-indigo-950 font-black flex items-center gap-2">
-                                <Calendar className="w-4 h-4 text-slate-400" />
-                                <div className="flex flex-col">
-                                  <span className="font-mono text-[11px]">{time.date}</span>
-                                  {time.sessionName && <span className="text-[9px] text-slate-400 font-sans tracking-tight">{time.sessionName}</span>}
-                                </div>
-                              </td>
-                              <td className="px-3 py-2 text-center font-mono font-bold text-slate-700">{time.count} أصناف</td>
-                              <td className="px-3 py-2 text-center">
-                                <span className="bg-rose-50 text-rose-700 px-2.5 py-0.5 rounded-full text-[10px] font-black border border-rose-100 font-mono">
-                                  {time.discrepancyCount} اختلافات
-                                </span>
-                              </td>
-                              <td className="px-3 py-2 text-center font-mono font-bold text-slate-600">{time.variance} وحدة</td>
-                              <td className="pl-4 py-2 text-right">
-                                <span className={`text-[10px] font-black px-2.5 py-0.5 rounded-full ${
-                                  time.net >= 0 ? "bg-emerald-50 text-emerald-700 border border-emerald-100" : "bg-rose-50 text-rose-700 border border-rose-100"
-                                }`}>
-                                  صافي الوردية: {time.net >= 0 ? `+${time.net}` : time.net}
-                                </span>
-                              </td>
-                            </tr>
-
-                            {/* Expanded Timeline details (CRITICAL USER REQUEST) */}
-                            <AnimatePresence initial={false}>
-                              {isExpanded && (
-                                <tr>
-                                  <td colSpan={6} className="bg-slate-50/75 p-0 border-b border-slate-150">
-                                    <motion.div
-                                      initial={{ height: 0, opacity: 0 }}
-                                      animate={{ height: "auto", opacity: 1 }}
-                                      exit={{ height: 0, opacity: 0 }}
-                                      className="overflow-hidden px-6 py-4 space-y-4"
-                                    >
-                                      <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
-                                        <Package className="w-4 h-4 text-indigo-600" />
-                                        <span className="text-xs font-black text-slate-800 font-sans">تفاصيل جرد الأصناف اليومي والعمليات المقيدة</span>
-                                      </div>
-
-                                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-64 overflow-y-auto scrollbar-thin pl-1 text-right">
-                                        {time.itemsList.map((item: any, idx: number) => (
-                                          <div key={idx} className="bg-white p-3 rounded-xl border border-slate-150 flex items-center justify-between text-[11px] font-sans hover:bg-slate-50/50 transition-colors">
-                                            <div className="space-y-0.5 min-w-0">
-                                              <span className="font-mono text-[9px] text-indigo-950 font-black block">كود: {item.itemId}</span>
-                                              <h4 className="font-bold text-slate-800 truncate" title={item.name}>{item.name}</h4>
-                                              <span className="text-[9px] text-slate-400 block font-bold">بواسطة: {item.auditor}</span>
-                                            </div>
-                                            <div className="text-left shrink-0 font-mono font-bold">
-                                              <div className="flex items-center gap-1.5 justify-end">
-                                                <span className="text-slate-400 text-[10px]">الدفتر: {item.book}</span>
-                                                <span className="text-slate-300">➔</span>
-                                                <span className="text-indigo-950 font-extrabold">الفعلي: {item.physical}</span>
-                                              </div>
-                                              <span className={`text-[10px] font-black block mt-0.5 ${
-                                                item.diff === 0 
-                                                  ? "text-slate-500" 
-                                                  : item.diff > 0 
-                                                    ? "text-emerald-600" 
-                                                    : "text-rose-600"
-                                              }`}>
-                                                {item.diff === 0 ? "✓ متطابق" : item.diff > 0 ? `+${item.diff} زيادة` : `${item.diff} عجز`}
-                                              </span>
-                                            </div>
-                                          </div>
-                                        ))}
-                                      </div>
-                                    </motion.div>
-                                  </td>
-                                </tr>
-                              )}
-                            </AnimatePresence>
-                          </React.Fragment>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                    ) : (
+                      generalDashboardData.timeline.map((time) => (
+                        <tr 
+                          key={time.id}
+                          className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors h-11"
+                        >
+                          <td className="pr-4 py-2 font-mono text-[10.5px] text-indigo-950 font-black flex items-center gap-1.5 h-11 whitespace-nowrap">
+                            <Calendar className="w-3.5 h-3.5 text-slate-400" />
+                            {time.date}
+                          </td>
+                          <td className="px-3 py-2 text-slate-800 font-bold">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[9px] font-mono text-slate-400 font-bold whitespace-nowrap">
+                                ID: {time.sessionId}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-3 py-2 text-center font-mono font-bold text-slate-700">{time.totalAssigned} صنفاً</td>
+                          <td className="px-3 py-2 text-center font-mono font-bold text-indigo-600">{time.totalSubmitted}</td>
+                          <td className="px-3 py-2 text-center font-mono font-bold text-orange-600">
+                            <span className="bg-orange-50 text-orange-700 px-2 py-0.5 rounded-full text-[10px] font-black border border-orange-100">
+                              {time.totalStorekeeperModifications}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 text-center font-mono font-bold text-indigo-600">
+                            <span className="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full text-[10px] font-black border border-indigo-100">
+                              {time.totalSupervisorCorrections}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 text-center font-mono font-bold text-rose-600">
+                            <span className="bg-rose-50 text-rose-700 px-2 py-0.5 rounded-full text-[10px] font-black border border-rose-100">
+                              {time.totalManagerCorrections}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 text-center font-mono font-bold text-slate-600">
+                            <span className="bg-slate-50 text-slate-700 px-2 py-0.5 rounded-full text-[10px] font-black border border-slate-100">
+                              {time.totalStorekeeperModifications + time.totalSupervisorCorrections + time.totalManagerCorrections}
+                            </span>
+                          </td>
+                          <td className="pl-4 py-2 text-center">
+                            <div className="flex items-center justify-center gap-2">
+                              <div className="w-16 bg-slate-100 h-2 rounded-full overflow-hidden">
+                                <div 
+                                  className={`h-full ${
+                                    time.recountMatchRate >= 85 
+                                      ? "bg-emerald-500" 
+                                      : time.recountMatchRate >= 60 
+                                        ? "bg-amber-500" 
+                                        : "bg-rose-500"
+                                  }`} 
+                                  style={{ width: `${time.recountMatchRate}%` }} 
+                                />
+                              </div>
+                              <span className="font-mono font-black text-slate-800">{time.recountMatchRate}%</span>
+                            </div>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
               </div>
             </motion.div>
           )}
