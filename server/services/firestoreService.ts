@@ -50,18 +50,7 @@ let lastFailureTime = 0;
 // Load config dynamically on server boot
 let appletConfig: any = null;
 try {
-  // Priority 1: Environment Variable (most secure in AI Studio)
-  const envConfig = getEnvSecret("FIREBASE_CONFIG");
-  if (envConfig && envConfig.trim().startsWith('{')) {
-    try {
-      appletConfig = JSON.parse(envConfig);
-      console.log("🔥 Firebase configuration loaded successfully from environment variable.");
-    } catch (e) {
-      console.error("⚠️ Failed to parse FIREBASE_CONFIG environment variable:", e);
-    }
-  }
-
-  // Priority 2: Config Files (fallback)
+  // Priority 1: Config Files (forced priority to avoid stale environment variables)
   if (!appletConfig) {
     const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
     const backupPath = path.join(process.cwd(), 'server', 'firebase-backup-config.json');
@@ -69,6 +58,19 @@ try {
       appletConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     } else if (fs.existsSync(backupPath)) {
       appletConfig = JSON.parse(fs.readFileSync(backupPath, 'utf-8'));
+    }
+  }
+
+  // Priority 2: Environment Variable (fallback)
+  if (!appletConfig) {
+    const envConfig = getEnvSecret("FIREBASE_CONFIG");
+    if (envConfig && envConfig.trim().startsWith('{')) {
+      try {
+        appletConfig = JSON.parse(envConfig);
+        console.log("🔥 Firebase configuration loaded successfully from environment variable.");
+      } catch (e) {
+        console.error("⚠️ Failed to parse FIREBASE_CONFIG environment variable:", e);
+      }
     }
   }
 } catch (err) {
