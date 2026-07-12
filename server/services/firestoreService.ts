@@ -50,7 +50,18 @@ let lastFailureTime = 0;
 // Load config dynamically on server boot
 let appletConfig: any = null;
 try {
-  // Priority 1: Config Files (forced priority to avoid stale environment variables)
+  // Priority 1: Environment Variable (most secure in AI Studio)
+  const envConfig = getEnvSecret("FIREBASE_CONFIG");
+  if (envConfig && envConfig.trim().startsWith('{')) {
+    try {
+      appletConfig = JSON.parse(envConfig);
+      console.log("🔥 Firebase configuration loaded successfully from environment variable.");
+    } catch (e) {
+      console.error("⚠️ Failed to parse FIREBASE_CONFIG environment variable:", e);
+    }
+  }
+
+  // Priority 2: Config Files (fallback)
   if (!appletConfig) {
     const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
     const backupPath = path.join(process.cwd(), 'server', 'firebase-backup-config.json');
@@ -58,19 +69,6 @@ try {
       appletConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     } else if (fs.existsSync(backupPath)) {
       appletConfig = JSON.parse(fs.readFileSync(backupPath, 'utf-8'));
-    }
-  }
-
-  // Priority 2: Environment Variable (fallback)
-  if (!appletConfig) {
-    const envConfig = getEnvSecret("FIREBASE_CONFIG");
-    if (envConfig && envConfig.trim().startsWith('{')) {
-      try {
-        appletConfig = JSON.parse(envConfig);
-        console.log("🔥 Firebase configuration loaded successfully from environment variable.");
-      } catch (e) {
-        console.error("⚠️ Failed to parse FIREBASE_CONFIG environment variable:", e);
-      }
     }
   }
 } catch (err) {
@@ -234,7 +232,7 @@ export function getFirestoreInstance(): Firestore | null {
       }
       
       // Dynamic Database ID resolution
-      let databaseId = freshConfig.firestoreDatabaseId || "ai-studio-00951ae3-ee45-4ad1-ad2a-6733dde9830e";
+      let databaseId = "ai-studio-00951ae3-ee45-4ad1-ad2a-6733dde9830e";
       
       try {
         // Try getFirestore first - often more stable in Node.js environments regarding internal filters/caches
@@ -339,14 +337,6 @@ export async function checkFirestoreHealth(): Promise<{ connected: boolean; heal
   if (!isFirestoreConfigured()) {
     return { connected: false, healthy: false, reason: "ملف الإعدادات (firebase-applet-config.json) غير موجود" };
   }
-  
-  // Proactively re-enable/retry on status checks to guarantee seamless automatic background reconnection
-  if (isFirestoreApiDisabled && !isFirestoreApiBlockedByGoogle) {
-    console.log("🔄 Auto-connecting to Firestore in background on status check...");
-    isFirestoreApiDisabled = false;
-    consecutiveFailures = 0;
-  }
-  
   if (isFirestoreApiDisabled) {
     return { connected: false, healthy: false, reason: isFirestoreApiBlockedByGoogle ? "تم تجاوز حدود استخدام Google API" : "معطل يدوياً أو بسبب أخطاء متكررة" };
   }
@@ -359,12 +349,9 @@ export async function checkFirestoreHealth(): Promise<{ connected: boolean; heal
   try {
     const testDoc = doc(db, resolveCollectionName("health_check"), "ping");
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error("Timeout")), 15000);
+      setTimeout(() => reject(new Error("Timeout")), 3000);
     });
     await Promise.race([getDoc(testDoc), timeoutPromise]);
-    
-    // Successfully connected! Ensure API is enabled
-    isFirestoreApiDisabled = false;
     return { connected: true, healthy: true };
   } catch (err: any) {
     return { connected: true, healthy: false, reason: `خطأ في الاتصال: ${err.message || "Timeout"}` };
@@ -467,11 +454,11 @@ export async function _getFirestoreDoc(collectionName: string, docId: string): P
   try {
     const docRef = doc(db, resolved, docId);
     
-    // Create a 15-second timeout to prevent startup/execution hang
+    // Create a 3-second timeout to prevent startup/execution hang
     const getDocPromise = getDoc(docRef);
     getDocPromise.catch(() => {}); // prevent unhandled promise rejection if it fails after timeout
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error("Timeout")), 15000);
+      setTimeout(() => reject(new Error("Timeout")), 3000);
     });
     const docSnap = await Promise.race([getDocPromise, timeoutPromise]);
 
@@ -530,11 +517,11 @@ export async function _setFirestoreDoc(collectionName: string, docId: string, da
   try {
     const docRef = doc(db, resolved, docId);
     
-    // Create a 15-second timeout to prevent startup/execution hang
+    // Create a 3-second timeout to prevent startup/execution hang
     const setDocPromise = setDoc(docRef, data, { merge: true });
     setDocPromise.catch(() => {}); // prevent unhandled promise rejection if it fails after timeout
     const timeoutPromise = new Promise<void>((_, reject) => {
-      setTimeout(() => reject(new Error("Timeout")), 15000);
+      setTimeout(() => reject(new Error("Timeout")), 3000);
     });
     await Promise.race([setDocPromise, timeoutPromise]);
 
@@ -580,11 +567,11 @@ export async function _deleteFirestoreDoc(collectionName: string, docId: string)
   try {
     const docRef = doc(db, resolved, docId);
     
-    // Create a 15-second timeout to prevent startup/execution hang
+    // Create a 3-second timeout to prevent startup/execution hang
     const deleteDocPromise = deleteDoc(docRef);
     deleteDocPromise.catch(() => {}); // prevent unhandled promise rejection if it fails after timeout
     const timeoutPromise = new Promise<void>((_, reject) => {
-      setTimeout(() => reject(new Error("Timeout")), 15000);
+      setTimeout(() => reject(new Error("Timeout")), 3000);
     });
     await Promise.race([deleteDocPromise, timeoutPromise]);
 
@@ -625,7 +612,7 @@ export async function _getFirestoreCollection(collectionName: string): Promise<a
     const getDocsPromise = getDocs(collRef);
     getDocsPromise.catch(() => {});
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error("Timeout")), 15000);
+      setTimeout(() => reject(new Error("Timeout")), 3000);
     });
     const snap = await Promise.race([getDocsPromise, timeoutPromise]);
 

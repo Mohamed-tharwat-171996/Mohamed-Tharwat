@@ -1540,16 +1540,9 @@ export default function StoresManagerDashboard({
       const managerModCount = sessionArchiveModifications.length + (isManagerActiveSessionCorrection ? 1 : 0);
 
       if (!timelineMap.has(groupKey)) {
-        // Find session index for version numbering
-        const sessionIdx = [...pastSessions]
-          .sort((a, b) => new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime())
-          .findIndex(s => s.id === item.sessionId);
-
         timelineMap.set(groupKey, {
           id: groupKey,
           date: dStr,
-          sessionId: item.sessionId,
-          versionNumber: sessionIdx !== -1 ? sessionIdx + 1 : 1,
           sessionName: sessionName !== "unknown" ? sessionName : undefined,
           totalAssigned: 0,
           totalSubmitted: 0,
@@ -2386,9 +2379,9 @@ export default function StoresManagerDashboard({
                                             {auditor.dailyHistory.map((day: any, hidx: number) => (
                                               <div 
                                                 key={hidx} 
-                                                className="bg-white px-4 py-3 rounded-lg border border-slate-150 flex flex-row items-center justify-between gap-4 text-[11px] hover:bg-slate-50/50 transition-colors w-full overflow-x-auto scrollbar-none"
+                                                className="bg-white px-4 py-3 rounded-lg border border-slate-150 flex flex-col lg:flex-row lg:items-center justify-between gap-4 text-[11px] hover:bg-slate-50/50 transition-colors w-full"
                                               >
-                                                <div className="flex flex-row items-center gap-4 shrink-0">
+                                                <div className="flex flex-col sm:flex-row sm:items-center gap-4 w-full lg:w-auto">
                                                   {/* Right Part: Date & Session */}
                                                   <div className="flex items-center gap-3 min-w-[130px] shrink-0">
                                                     <span className="font-mono text-[10.5px] text-indigo-950 font-black flex items-center gap-1">
@@ -2415,7 +2408,7 @@ export default function StoresManagerDashboard({
                                                       {day.rechecksCount > 0 ? (
                                                         <div className="flex flex-col gap-0.5">
                                                           <span className="bg-rose-50 text-rose-700 px-2 py-0.5 rounded text-[9px] font-black border border-rose-100 whitespace-nowrap self-start">
-                                                            تمت اعادة جرد {day.rechecksCount} صنف باجمالي تعديلات {day.totalStorekeeperModifications + day.totalSupervisorCorrections + day.totalManagerCorrections} تعديل
+                                                            تمت اعادة جرد {day.rechecksCount} صنف باجمالي تعديلات {day.totalStorekeeperModifications + day.totalSupervisorCorrections + day.totalManagerCorrections} صنف
                                                           </span>
                                                         </div>
                                                       ) : (
@@ -2428,7 +2421,7 @@ export default function StoresManagerDashboard({
                                                 </div>
 
                                                 {/* Left Part: Stats */}
-                                                <div className="flex flex-row items-center gap-4 text-slate-500 font-medium shrink-0">
+                                                <div className="flex flex-wrap items-center justify-between sm:justify-start gap-4 text-slate-500 font-medium shrink-0 border-t border-slate-100 pt-2 lg:border-t-0 lg:pt-0 w-full lg:w-auto">
                                                   <div className="w-16 text-center">
                                                     <div className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">الأصناف المجرودة</div>
                                                     <div className="font-mono font-black text-[10px] text-slate-700">{day.totalItems}</div>
@@ -2598,9 +2591,9 @@ export default function StoresManagerDashboard({
                                             {sup.dailyHistory.map((day: any, hidx: number) => (
                                               <div 
                                                 key={hidx} 
-                                                className="bg-white px-4 py-3 rounded-lg border border-slate-150 flex flex-row items-center justify-between gap-4 text-[11px] hover:bg-slate-50/50 transition-colors w-full overflow-x-auto scrollbar-none"
+                                                className="bg-white px-4 py-3 rounded-lg border border-slate-150 flex flex-col lg:flex-row lg:items-center justify-between gap-4 text-[11px] hover:bg-slate-50/50 transition-colors w-full"
                                               >
-                                                <div className="flex flex-row items-center gap-4 shrink-0">
+                                                <div className="flex flex-col sm:flex-row sm:items-center gap-4 w-full lg:w-auto">
                                                   {/* Right Part: Date & Session */}
                                                   <div className="flex items-center gap-3 min-w-[130px] shrink-0">
                                                     <span className="font-mono text-[10.5px] text-indigo-950 font-black flex items-center gap-1">
@@ -2627,8 +2620,20 @@ export default function StoresManagerDashboard({
                                                       {day.recountsCount > 0 ? (
                                                         <div className="flex flex-col gap-0.5">
                                                           <span className="bg-amber-50 text-amber-700 px-2 py-0.5 rounded text-[9px] font-black border border-amber-100 whitespace-nowrap">
-                                                            تمت اعادة جرد {day.recountsCount} صنف باجمالي تعديلات {day.totalStorekeeperModifications + day.totalSupervisorCorrections + day.totalManagerCorrections} تعديل
+                                                            تمت اعادة جرد {day.recountsCount} صنف باجمالي تعديلات {day.totalStorekeeperModifications + day.totalSupervisorCorrections + day.totalManagerCorrections}
                                                           </span>
+                                                          {/* Detailed supervisor mods if available (Show only supervisor mods as per user request) */}
+                                                          {day.totalSupervisorCorrections > 0 && (
+                                                            <div className="flex flex-wrap gap-1 max-w-[300px]">
+                                                              {sup.history
+                                                                .filter((h: any) => h.date === day.date && h.sessionName === day.sessionName && h.totalSupervisorCorrections > 0)
+                                                                .map((h: any, midx: number) => (
+                                                                  <span key={midx} className="bg-indigo-50 text-indigo-700 border border-indigo-100 px-1 rounded text-[7px] font-bold">
+                                                                    {h.storekeeper} ➔ {h.supervisor}
+                                                                  </span>
+                                                                ))}
+                                                            </div>
+                                                          )}
                                                         </div>
                                                       ) : (
                                                         <span className="bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded text-[9px] font-bold border border-emerald-100 whitespace-nowrap">
@@ -2640,7 +2645,7 @@ export default function StoresManagerDashboard({
                                                 </div>
 
                                                 {/* Left Part: Stats */}
-                                                <div className="flex flex-row items-center gap-4 text-slate-500 font-medium shrink-0">
+                                                <div className="flex flex-wrap items-center justify-between sm:justify-start gap-4 text-slate-500 font-medium shrink-0 border-t border-slate-100 pt-2 lg:border-t-0 lg:pt-0 w-full lg:w-auto">
                                                   <div className="w-16 text-center">
                                                     <div className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">الأصناف المدققة</div>
                                                     <div className="font-mono font-black text-[10px] text-slate-700">{day.totalItems}</div>
@@ -2705,8 +2710,8 @@ export default function StoresManagerDashboard({
                 <table className="w-full text-right text-[11px] font-sans border-collapse min-w-[850px]">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-150 text-slate-600 font-black h-11">
-                      <th className="pr-4 py-2 w-44 whitespace-nowrap">تاريخ الجرد</th>
-                      <th className="px-3 py-2 min-w-[220px]">نسخة الجرد</th>
+                      <th className="pr-4 py-2 w-32">تاريخ الجرد</th>
+                      <th className="px-3 py-2 min-w-[180px]">نسخة الجرد</th>
                       <th className="px-3 py-2 w-32 text-center">الأصناف المسندة</th>
                       <th className="px-3 py-2 w-32 text-center">أصناف تم جردها</th>
                       <th className="px-3 py-2 w-32 text-center">تعديلات الأمين</th>
@@ -2727,16 +2732,12 @@ export default function StoresManagerDashboard({
                           key={time.id}
                           className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors h-11"
                         >
-                          <td className="pr-4 py-2 font-mono text-[10.5px] text-indigo-950 font-black flex items-center gap-1.5 h-11 whitespace-nowrap">
+                          <td className="pr-4 py-2 font-mono text-[10.5px] text-indigo-950 font-black flex items-center gap-1.5 h-11">
                             <Calendar className="w-3.5 h-3.5 text-slate-400" />
                             {time.date}
                           </td>
                           <td className="px-3 py-2 text-slate-800 font-bold">
-                            <div className="flex items-center gap-2">
-                              <span className="text-[9px] font-mono text-slate-400 font-bold whitespace-nowrap">
-                                ID: {time.sessionId}
-                              </span>
-                            </div>
+                            {time.sessionName || "وردية جرد عام"}
                           </td>
                           <td className="px-3 py-2 text-center font-mono font-bold text-slate-700">{time.totalAssigned} صنفاً</td>
                           <td className="px-3 py-2 text-center font-mono font-bold text-indigo-600">{time.totalSubmitted}</td>

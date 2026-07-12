@@ -7864,26 +7864,8 @@ export default function App() {
                   <Calendar className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-slate-800 text-[12px] sm:text-sm flex items-center gap-2">
-                    <span>تقرير جرد يوم :</span>
-                    {isEditingInspectSession && user?.role === 'program_manager' ? (
-                      <input
-                        type="date"
-                        value={new Date(inspectSession.date).toISOString().split('T')[0]}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          if (val) {
-                            const newDate = new Date(val).toISOString();
-                            setInspectSession({ ...inspectSession, date: newDate });
-                          }
-                        }}
-                        className="px-2 py-1 border border-indigo-200 rounded-lg text-xs font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 bg-white shadow-sm"
-                      />
-                    ) : (
-                      <span className="text-indigo-700">
-                        {new Date(inspectSession.date).toLocaleDateString("ar-EG", { year: "numeric", month: "short", day: "numeric" })}
-                      </span>
-                    )}
+                  <h3 className="font-bold text-slate-800 text-[12px] sm:text-sm">
+                    تقرير جرد يوم : {new Date(inspectSession.date).toLocaleDateString("ar-EG", { year: "numeric", month: "short", day: "numeric" })}
                   </h3>
                   <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 mt-1.5">
                     <span className="text-[9px] font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100/50 inline-flex items-center gap-1 whitespace-nowrap self-start">

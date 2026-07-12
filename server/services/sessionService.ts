@@ -119,6 +119,7 @@ export class SessionService {
       dbService.run("DELETE FROM inventory");
       dbService.run("DELETE FROM inventory_snapshots");
       dbService.run("DELETE FROM deleted_sessions");
+      dbService.run("DELETE FROM permanent_tombstones");
       dbService.run("DELETE FROM settings WHERE key = 'activeSession'");
       const now = Date.now();
       dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedMaster', ?)", [now.toString()]);

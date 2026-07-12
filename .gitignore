@@ -26,13 +26,3 @@ temp_*.txt
 admin_*.txt
 non_admin_*.txt
 server/server-local-sync-mirror_*.json
-
-# Missing requested ignore rules
-recovered.json
-recovered_sessions.json
-restore-firebase.cjs
-restore_session.cjs
-fix-*.cjs
-update_*.cjs
-metadata.json
-scripts/
