@@ -231,11 +231,8 @@ export function getFirestoreInstance(): Firestore | null {
         console.warn("⚠️ Failed to initialize Firebase Auth on server:", authInitErr.message);
       }
       
-      // Dynamic Database ID resolution
-      let databaseId = "ai-studio-00951ae3-ee45-4ad1-ad2a-6733dde9830e";
-      if (freshConfig && (freshConfig.firestoreDatabaseId || freshConfig.databaseId)) {
-        databaseId = freshConfig.firestoreDatabaseId || freshConfig.databaseId;
-      }
+      // Dynamic Database ID resolution (Strictly locked to 'ai-studio-00951ae3-ee45-4ad1-ad2a-6733dde9830e' by user request)
+      const databaseId = "ai-studio-00951ae3-ee45-4ad1-ad2a-6733dde9830e";
       
       try {
         // Try getFirestore first - often more stable in Node.js environments regarding internal filters/caches
