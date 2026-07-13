@@ -100,6 +100,8 @@ export default function StoresManagerDashboard({
       system_admin: "مسئول النظام",
       program_manager: "مسئول البرنامج",
       supervisor: "مشرف مخازن",
+      warehouse_supervisor: "مشرف مخازن",
+      stores_manager: "مدير مخازن",
       storekeeper: "أمين مخزن"
     };
 
@@ -726,8 +728,8 @@ export default function StoresManagerDashboard({
         );
         
         if (!alreadyRecordedSupMod) {
-          const supKey = "102"; // Strictly use supervisor's user code
-          const details = getUserDetails(supKey, "مشرف مخازن", "مشرف مخازن");
+          const supKey = item.sessionSupervisorApprovedBy || "102"; // Use actual approvedBy user name/code or fallback to "102"
+          const details = getUserDetails(supKey, supKey, "مشرف مخازن");
           
           const baseDate = item.sessionSupervisorApprovedAt 
             ? new Date(item.sessionSupervisorApprovedAt)
