@@ -743,7 +743,7 @@ router.post("/deleted/restore", AuthService.authenticateJWT, AuthService.require
                 VALUES (?, ?, ?, ?, ?, ?, ?)
               `, [
                 String(item.itemId || item.id),
-                item.itemName || item.name,
+                item.itemName || item.name || "بند غير مسمى",
                 item.category || "عام",
                 Number(item.bookQty) || 0,
                 item.unit || "كجم",

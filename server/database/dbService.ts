@@ -366,7 +366,7 @@ export class DatabaseService {
         for (const item of masterItems) {
           insertItem.run({
             id: String(item.id || item.itemId),
-            name: item.name || item.itemName,
+            name: item.name || item.itemName || "بند غير مسمى",
             category: item.category || "",
             bookQty: Number(item.bookQty) || 0,
             unit: item.unit || "كجم",

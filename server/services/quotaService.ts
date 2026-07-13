@@ -237,7 +237,19 @@ export class QuotaService {
 
       const doUpdate = async () => {
         try {
-          await updateDoc(docRef, updateData);
+          const docSnap = await getDoc(docRef);
+          if (docSnap && docSnap.exists()) {
+            await updateDoc(docRef, updateData);
+          } else {
+            const initialData: any = {
+              reads,
+              writes: writes + 1,
+              deletes,
+              updatedAt: Date.now(),
+              users: userStats
+            };
+            await setDoc(docRef, initialData);
+          }
         } catch (err: any) {
           const errMsg = String(err.message || "").toLowerCase();
           const errCode = String(err.code || "").toLowerCase();

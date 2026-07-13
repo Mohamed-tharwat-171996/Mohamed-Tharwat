@@ -119,7 +119,6 @@ export class SessionService {
       dbService.run("DELETE FROM inventory");
       dbService.run("DELETE FROM inventory_snapshots");
       dbService.run("DELETE FROM deleted_sessions");
-      dbService.run("DELETE FROM permanent_tombstones");
       dbService.run("DELETE FROM settings WHERE key = 'activeSession'");
       const now = Date.now();
       dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('lastUpdatedMaster', ?)", [now.toString()]);
@@ -215,7 +214,7 @@ export class SessionService {
           const dbItem = dbItemsMap.get(itemId);
           return {
             id: itemId,
-            name: incomingItem.name || incomingItem.itemName || (dbItem ? dbItem.name : ""),
+            name: incomingItem.name || incomingItem.itemName || (dbItem ? dbItem.name : "") || "بند غير مسمى",
             category: incomingItem.category || (dbItem ? dbItem.category : "عام"),
             bookQty: incomingItem.bookQty !== undefined ? Number(incomingItem.bookQty) : (dbItem ? dbItem.bookQty : 0),
             unit: incomingItem.unit || (dbItem ? dbItem.unit : "كجم"),
@@ -230,7 +229,7 @@ export class SessionService {
           if (!incomingIds.has(idStr)) {
             finalItemsToSave.push({
               id: idStr,
-              name: existing.name,
+              name: existing.name || "بند غير مسمى",
               category: existing.category || "عام",
               bookQty: existing.bookQty !== undefined ? Number(existing.bookQty) : 0,
               unit: existing.unit || "كجم",
@@ -250,7 +249,7 @@ export class SessionService {
         for (const item of finalItemsToSave) {
           insertItem([
             item.id,
-            item.name,
+            item.name || "بند غير مسمى",
             item.category || "عام",
             Number(item.bookQty) || 0,
             item.unit || "كجم",

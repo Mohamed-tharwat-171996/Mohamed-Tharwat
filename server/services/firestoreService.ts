@@ -233,6 +233,9 @@ export function getFirestoreInstance(): Firestore | null {
       
       // Dynamic Database ID resolution
       let databaseId = "ai-studio-00951ae3-ee45-4ad1-ad2a-6733dde9830e";
+      if (freshConfig && (freshConfig.firestoreDatabaseId || freshConfig.databaseId)) {
+        databaseId = freshConfig.firestoreDatabaseId || freshConfig.databaseId;
+      }
       
       try {
         // Try getFirestore first - often more stable in Node.js environments regarding internal filters/caches
@@ -337,6 +340,14 @@ export async function checkFirestoreHealth(): Promise<{ connected: boolean; heal
   if (!isFirestoreConfigured()) {
     return { connected: false, healthy: false, reason: "ملف الإعدادات (firebase-applet-config.json) غير موجود" };
   }
+  
+  // Auto-reconnect if circuit breaker tripped but not Google-blocked
+  if (isFirestoreApiDisabled && !isFirestoreApiBlockedByGoogle) {
+    console.log("🔄 Auto-reconnect attempt on status check...");
+    isFirestoreApiDisabled = false;
+    consecutiveFailures = 0;
+  }
+
   if (isFirestoreApiDisabled) {
     return { connected: false, healthy: false, reason: isFirestoreApiBlockedByGoogle ? "تم تجاوز حدود استخدام Google API" : "معطل يدوياً أو بسبب أخطاء متكررة" };
   }
@@ -352,6 +363,7 @@ export async function checkFirestoreHealth(): Promise<{ connected: boolean; heal
       setTimeout(() => reject(new Error("Timeout")), 3000);
     });
     await Promise.race([getDoc(testDoc), timeoutPromise]);
+    isFirestoreApiDisabled = false;
     return { connected: true, healthy: true };
   } catch (err: any) {
     return { connected: true, healthy: false, reason: `خطأ في الاتصال: ${err.message || "Timeout"}` };

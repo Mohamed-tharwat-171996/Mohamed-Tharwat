@@ -216,7 +216,7 @@ export class FirebaseBackupService {
       for (const item of masterItems) {
         insertItem([
           String(item.id || item.itemId),
-          item.name || item.itemName,
+          item.name || item.itemName || "بند غير مسمى",
           item.category || "عام",
           Number(item.bookQty) || 0,
           item.unit || "كجم",
@@ -424,7 +424,7 @@ export class FirebaseBackupService {
       };
 
       try {
-        await withTimeout(setDoc(docRef, dbBackupObj, { merge: true }), OVERRIDE_TIMEOUT_MS, "setDoc");
+        await withTimeout(setDoc(docRef, dbBackupObj), OVERRIDE_TIMEOUT_MS, "setDoc");
         let writeCount = 1;
 
         // 📦 SYNC ARCHIVED SESSIONS INDIVIDUALLY:
@@ -1090,7 +1090,7 @@ export class FirebaseBackupService {
           for (const item of masterItems) {
             insertItem([
               String(item.id || item.itemId),
-              item.name || item.itemName,
+              item.name || item.itemName || "بند غير مسمى",
               item.category || "عام",
               Number(item.bookQty) || 0,
               item.unit || "كجم",
