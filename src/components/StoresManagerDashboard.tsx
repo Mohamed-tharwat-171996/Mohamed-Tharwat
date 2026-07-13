@@ -327,6 +327,8 @@ export default function StoresManagerDashboard({
   const [startDate, setStartDate] = useState<string>("");
   const [endDate, setEndDate] = useState<string>("");
   const [selectedSmartKeeperCode, setSelectedSmartKeeperCode] = useState<string>("all");
+  const [selectedSupervisorFilter, setSelectedSupervisorFilter] = useState<string>("all");
+  const [selectedVarianceReasonFilter, setSelectedVarianceReasonFilter] = useState<string>("all");
 
   // Dynamically slice the past sessions dataset based on filters prior to running the analytical engine
   const filteredPastSessionsForAnalytics = useMemo(() => {
@@ -337,6 +339,16 @@ export default function StoresManagerDashboard({
       }
       if (selectedItemIdFilter !== "all") {
         filteredItems = filteredItems.filter((itm: any) => String(itm.itemId || itm.id) === selectedItemIdFilter);
+      }
+      if (selectedSupervisorFilter !== "all") {
+        filteredItems = filteredItems.filter((itm: any) => 
+          session.supervisorApprovedBy === selectedSupervisorFilter || 
+          itm.inventoriedByName === selectedSupervisorFilter ||
+          (itm.storekeeperModifications || []).some((mod: any) => mod.modifiedByName === selectedSupervisorFilter)
+        );
+      }
+      if (selectedVarianceReasonFilter !== "all") {
+        filteredItems = filteredItems.filter((itm: any) => (itm.varianceReason || "أخرى") === selectedVarianceReasonFilter);
       }
       return {
         ...session,
@@ -353,7 +365,7 @@ export default function StoresManagerDashboard({
       }
       return session.items && session.items.length > 0;
     });
-  }, [pastSessions, selectedSessionIdFilter, selectedAuditor, selectedItemIdFilter, startDate, endDate]);
+  }, [pastSessions, selectedSessionIdFilter, selectedAuditor, selectedItemIdFilter, startDate, endDate, selectedSupervisorFilter, selectedVarianceReasonFilter]);
 
   // Run AI-powered Smart Analytics over the filtered historical sessions
   const smartAnalyticsData = useMemo(() => {
@@ -472,6 +484,7 @@ export default function StoresManagerDashboard({
   const filterOptions = useMemo(() => {
     const auditorsMap = new Map<string, string>(); // code -> name
     const uniqueItemsMap = new Map<string, string>(); // itemId -> name
+    const supervisorsMap = new Map<string, string>(); // name/code -> name
     let minDate = "";
     let maxDate = "";
 
@@ -481,6 +494,11 @@ export default function StoresManagerDashboard({
         const dStr = session.date.split("T")[0];
         if (!minDate || dStr < minDate) minDate = dStr;
         if (!maxDate || dStr > maxDate) maxDate = dStr;
+      }
+
+      // Supervisor extraction from session approvals
+      if (session.supervisorApprovedBy) {
+        supervisorsMap.set(String(session.supervisorApprovedBy), String(session.supervisorApprovedBy));
       }
 
       // Items extraction
@@ -500,12 +518,28 @@ export default function StoresManagerDashboard({
             auditorsMap.set(String(code), nameStr);
           }
         }
+
+        // Supervisor extraction from item level
+        if (item.inventoriedByName) {
+          const isSK = allUsers.some(u => u.name === item.inventoriedByName && u.role === "storekeeper");
+          if (!isSK) {
+            supervisorsMap.set(String(item.inventoriedByName), String(item.inventoriedByName));
+          }
+        }
       });
+    });
+
+    // Also collect supervisors from allUsers list to be comprehensive
+    allUsers.forEach(u => {
+      if (u.role === "supervisor" && u.name) {
+        supervisorsMap.set(String(u.name), String(u.name));
+      }
     });
 
     return {
       auditors: Array.from(auditorsMap.entries()).map(([code, name]) => ({ code, name })),
       items: Array.from(uniqueItemsMap.entries()).map(([id, name]) => ({ id, name })),
+      supervisors: Array.from(supervisorsMap.entries()).map(([code, name]) => ({ code: code, name: name })),
       minDate,
       maxDate
     };
@@ -525,6 +559,8 @@ export default function StoresManagerDashboard({
 
     // Flatten items and apply remaining filters
     const allFilteredItems: any[] = [];
+    const sessionsWithItems = new Set<string>();
+
     filteredSessions.forEach(session => {
       const sessionDate = session.date ? session.date.split("T")[0] : "غير محدد";
       (session.items || []).forEach((item: any) => {
@@ -537,7 +573,18 @@ export default function StoresManagerDashboard({
         // Auditor filter (only matches storekeepers)
         const matchesAuditor = selectedAuditor === "all" || String(auditorCode) === selectedAuditor;
 
-        if (matchesItem && matchesAuditor) {
+        // Supervisor filter: Match session supervisor or item inventoriedByName
+        const matchesSupervisor = selectedSupervisorFilter === "all" || 
+          session.supervisorApprovedBy === selectedSupervisorFilter || 
+          item.inventoriedByName === selectedSupervisorFilter ||
+          (item.storekeeperModifications || []).some((mod: any) => mod.modifiedByName === selectedSupervisorFilter);
+
+        // Variance Reason filter: Match item.varianceReason
+        const itemVarianceReason = item.varianceReason || "أخرى";
+        const matchesVarianceReason = selectedVarianceReasonFilter === "all" || 
+          itemVarianceReason === selectedVarianceReasonFilter;
+
+        if (matchesItem && matchesAuditor && matchesSupervisor && matchesVarianceReason) {
           allFilteredItems.push({
             ...item,
             sessionDate,
@@ -549,15 +596,38 @@ export default function StoresManagerDashboard({
             sessionSupervisorApprovedBy: session.supervisorApprovedBy || "",
             sessionSupervisorApprovedAt: session.supervisorApprovedAt || ""
           });
+          sessionsWithItems.add(session.id);
         }
       });
     });
 
+    // Only keep sessions that have at least one matching item, or if no specific filters are requested, keep sessions
+    const finalFilteredSessions = filteredSessions.filter(session => {
+      const hasActiveItemFilters = selectedItemIdFilter !== "all" || 
+        selectedAuditor !== "all" || 
+        selectedSupervisorFilter !== "all" || 
+        selectedVarianceReasonFilter !== "all";
+      
+      if (hasActiveItemFilters) {
+        return sessionsWithItems.has(session.id);
+      }
+      return true;
+    });
+
     return {
-      sessions: filteredSessions,
+      sessions: finalFilteredSessions,
       items: allFilteredItems
     };
-  }, [pastSessions, selectedItemIdFilter, selectedAuditor, startDate, endDate, selectedSessionIdFilter]);
+  }, [
+    pastSessions, 
+    selectedItemIdFilter, 
+    selectedAuditor, 
+    startDate, 
+    endDate, 
+    selectedSessionIdFilter,
+    selectedSupervisorFilter,
+    selectedVarianceReasonFilter
+  ]);
 
   // 5. Detect Cross-Session Modifications (Removed: Each session is independent as requested)
 
@@ -1244,7 +1314,7 @@ export default function StoresManagerDashboard({
   const supervisorStats = useMemo(() => {
     const map = new Map<string, any>();
 
-    pastSessions.forEach(session => {
+    filteredData.sessions.forEach(session => {
       const isApproved = session.supervisorApproved || session.supervisorApprovedBy;
       if (isApproved) {
         const name = session.supervisorApprovedBy || "مشرف غير محدد";
@@ -1460,7 +1530,7 @@ export default function StoresManagerDashboard({
       const codeB = parseInt(String(b.code)) || 0;
       return codeA - codeB;
     });
-  }, [pastSessions]);
+  }, [filteredData, allUsers]);
 
   // 9. General Dashboard (Tab 3) - Daily Timelines (Without categories as requested)
   const generalDashboardData = useMemo(() => {
@@ -1542,6 +1612,7 @@ export default function StoresManagerDashboard({
       if (!timelineMap.has(groupKey)) {
         timelineMap.set(groupKey, {
           id: groupKey,
+          sessionId: item.sessionId,
           date: dStr,
           sessionName: sessionName !== "unknown" ? sessionName : undefined,
           totalAssigned: 0,
@@ -1605,6 +1676,8 @@ export default function StoresManagerDashboard({
     setEndDate("");
     setStreakFilter("all");
     setSelectedSessionIdFilter("all");
+    setSelectedSupervisorFilter("all");
+    setSelectedVarianceReasonFilter("all");
     setVisibleFilterSections([]);
   };
 
@@ -1616,12 +1689,14 @@ export default function StoresManagerDashboard({
     if (selectedAuditor !== "all") active.push('auditor');
     if (streakFilter !== "all") active.push('streak');
     if (selectedSessionIdFilter !== "all") active.push('session');
+    if (selectedSupervisorFilter !== "all") active.push('supervisor');
+    if (selectedVarianceReasonFilter !== "all") active.push('varianceReason');
     
     setVisibleFilterSections(prev => {
       const combined = [...new Set([...prev, ...active])];
       return combined;
     });
-  }, [selectedItemIdFilter, startDate, endDate, selectedAuditor, streakFilter, selectedSessionIdFilter]);
+  }, [selectedItemIdFilter, startDate, endDate, selectedAuditor, streakFilter, selectedSessionIdFilter, selectedSupervisorFilter, selectedVarianceReasonFilter]);
 
   // Automatically expand the item if it's the only one selected in item dropdown!
   React.useEffect(() => {
@@ -1642,7 +1717,7 @@ export default function StoresManagerDashboard({
           className="bg-white p-1.5 rounded-xl border border-slate-200 shadow-3xs flex flex-col items-center justify-center gap-0.5 min-h-[42px]"
         >
           <span className="text-[6.5px] text-slate-500 font-extrabold leading-tight text-center">نسخ الجرد</span>
-          <div className="text-[11px] font-black text-slate-800">{pastSessions.length}</div>
+          <div className="text-[11px] font-black text-slate-800">{filteredData.sessions.length}</div>
         </motion.div>
 
         {/* Card 2: Persistent Discrepancies */}
@@ -1708,6 +1783,8 @@ export default function StoresManagerDashboard({
                     { id: 'item', label: 'الصنف المستهدف', icon: Package },
                     { id: 'date', label: 'نطاق التاريخ', icon: Calendar },
                     { id: 'auditor', label: 'أمين المخزن', icon: UserCheck },
+                    { id: 'supervisor', label: 'مشرف المخزن', icon: Shield },
+                    { id: 'varianceReason', label: 'سبب الفرق', icon: AlertTriangle },
                     { id: 'streak', label: 'حالة الانحراف', icon: AlertCircle }
                   ].map((option) => (
                     <button
@@ -1732,7 +1809,7 @@ export default function StoresManagerDashboard({
             </AnimatePresence>
           </div>
 
-          {(selectedItemIdFilter !== "all" || selectedAuditor !== "all" || startDate || endDate || streakFilter !== "all" || selectedSessionIdFilter !== "all") && (
+          {(selectedItemIdFilter !== "all" || selectedAuditor !== "all" || startDate || endDate || streakFilter !== "all" || selectedSessionIdFilter !== "all" || selectedSupervisorFilter !== "all" || selectedVarianceReasonFilter !== "all") && (
             <button 
               onClick={handleClearFilters}
               className="text-[9px] font-black text-rose-600 bg-rose-50 hover:bg-rose-100 px-2.5 py-1 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
@@ -1849,8 +1926,11 @@ export default function StoresManagerDashboard({
             ))}
           </AnimatePresence>
 
-          {/* Group Auditor and Streak filters vertically if visible */}
-          {(visibleFilterSections.includes('auditor') || visibleFilterSections.includes('streak')) && (
+          {/* Group Auditor, Supervisor, Variance Reason, and Streak filters vertically if visible */}
+          {(visibleFilterSections.includes('auditor') || 
+            visibleFilterSections.includes('supervisor') || 
+            visibleFilterSections.includes('varianceReason') || 
+            visibleFilterSections.includes('streak')) && (
             <div className="flex flex-col gap-2">
               {visibleFilterSections.includes('auditor') && (
                 <div className="w-full bg-slate-50/50 border border-slate-100 rounded-xl p-2 relative group flex items-center">
@@ -1871,6 +1951,63 @@ export default function StoresManagerDashboard({
                       onClick={() => {
                         setVisibleFilterSections(prev => prev.filter(id => id !== 'auditor'));
                         setSelectedAuditor('all');
+                      }}
+                      className="p-1 text-rose-500 hover:bg-rose-50 rounded-lg cursor-pointer transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {visibleFilterSections.includes('supervisor') && (
+                <div className="w-full bg-slate-50/50 border border-slate-100 rounded-xl p-2 relative group flex items-center">
+                  <div className="flex flex-1 items-center gap-2">
+                    <div className="w-full">
+                      <select
+                        value={selectedSupervisorFilter}
+                        onChange={e => setSelectedSupervisorFilter(e.target.value)}
+                        className="w-full px-2 py-1.5 text-[9px] font-bold bg-white border border-slate-200 rounded-lg outline-none focus:ring-1 focus:ring-indigo-500 transition-all cursor-pointer text-slate-700 truncate"
+                      >
+                        <option value="all">كل مشرفي المخازن</option>
+                        {filterOptions.supervisors.map(sup => (
+                          <option key={sup.code} value={sup.code}>{sup.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <button 
+                      onClick={() => {
+                        setVisibleFilterSections(prev => prev.filter(id => id !== 'supervisor'));
+                        setSelectedSupervisorFilter('all');
+                      }}
+                      className="p-1 text-rose-500 hover:bg-rose-50 rounded-lg cursor-pointer transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {visibleFilterSections.includes('varianceReason') && (
+                <div className="w-full bg-slate-50/50 border border-slate-100 rounded-xl p-2 relative group flex items-center">
+                  <div className="flex flex-1 items-center gap-2">
+                    <div className="w-full">
+                      <select
+                        value={selectedVarianceReasonFilter}
+                        onChange={e => setSelectedVarianceReasonFilter(e.target.value)}
+                        className="w-full px-2 py-1.5 text-[9px] font-bold bg-white border border-slate-200 rounded-lg outline-none focus:ring-1 focus:ring-indigo-500 transition-all cursor-pointer text-slate-700 truncate"
+                      >
+                        <option value="all">كل أسباب الفروقات</option>
+                        <option value="خطأ جرد">خطأ جرد</option>
+                        <option value="خطأ انتاج">خطأ انتاج</option>
+                        <option value="خطأ تحميل">خطأ تحميل</option>
+                        <option value="أخرى">أخرى</option>
+                      </select>
+                    </div>
+                    <button 
+                      onClick={() => {
+                        setVisibleFilterSections(prev => prev.filter(id => id !== 'varianceReason'));
+                        setSelectedVarianceReasonFilter('all');
                       }}
                       className="p-1 text-rose-500 hover:bg-rose-50 rounded-lg cursor-pointer transition-colors"
                     >
@@ -2379,72 +2516,60 @@ export default function StoresManagerDashboard({
                                             {auditor.dailyHistory.map((day: any, hidx: number) => (
                                               <div 
                                                 key={hidx} 
-                                                className="bg-white px-4 py-3 rounded-lg border border-slate-150 flex flex-col lg:flex-row lg:items-center justify-between gap-4 text-[11px] hover:bg-slate-50/50 transition-colors w-full"
+                                                className="bg-white px-3 py-1.5 rounded-lg border border-slate-150 flex items-center justify-between gap-3 text-[10px] hover:bg-slate-50/50 transition-colors w-full overflow-x-auto scrollbar-none"
                                               >
-                                                <div className="flex flex-col sm:flex-row sm:items-center gap-4 w-full lg:w-auto">
-                                                  {/* Right Part: Date & Session */}
-                                                  <div className="flex items-center gap-3 min-w-[130px] shrink-0">
-                                                    <span className="font-mono text-[10.5px] text-indigo-950 font-black flex items-center gap-1">
-                                                      <Calendar className="w-3.5 h-3.5 text-slate-400" />
+                                                {/* Right Side: Date, Session, Status */}
+                                                <div className="flex items-center gap-3 shrink-0">
+                                                  <div className="flex flex-col min-w-[70px]">
+                                                    <span className="font-mono text-[10px] text-indigo-950 font-black flex items-center gap-1">
+                                                      <Calendar className="w-3 h-3 text-slate-400" />
                                                       {day.date}
                                                     </span>
-                                                    <span className="text-slate-400 font-bold truncate max-w-[100px]">
+                                                    <span className="text-[8px] text-slate-400 font-bold truncate max-w-[80px]">
                                                       {day.sessionName}
                                                     </span>
                                                   </div>
 
-                                                  {/* Middle Part: Notes & Status */}
-                                                  <div className="flex items-center gap-3 overflow-hidden">
-                                                    {day.notes && (
-                                                      <div className="min-w-[120px] max-w-[220px] shrink-0">
-                                                        <div className="text-[7px] text-amber-500 font-black leading-none mb-0.5">الملاحظات</div>
-                                                        <div className="bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded border border-amber-100 text-[8.5px] leading-tight truncate" title={day.notes}>
-                                                          {day.notes}
-                                                        </div>
-                                                      </div>
-                                                    )}
-
-                                                    <div className="shrink-0 flex flex-col gap-1">
-                                                      {day.rechecksCount > 0 ? (
-                                                        <div className="flex flex-col gap-0.5">
-                                                          <span className="bg-rose-50 text-rose-700 px-2 py-0.5 rounded text-[9px] font-black border border-rose-100 whitespace-nowrap self-start">
-                                                            تمت اعادة جرد {day.rechecksCount} صنف باجمالي تعديلات {day.totalStorekeeperModifications + day.totalSupervisorCorrections + day.totalManagerCorrections} صنف
-                                                          </span>
-                                                        </div>
-                                                      ) : (
-                                                        <span className="bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded text-[9px] font-bold border border-emerald-100 whitespace-nowrap">
-                                                          ✓ لم يستدعِ أي تعديل من المشرف
-                                                        </span>
-                                                      )}
+                                                  {day.notes && (
+                                                    <div className="bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded border border-amber-100 text-[8.5px] max-w-[100px] truncate" title={day.notes}>
+                                                      {day.notes}
                                                     </div>
+                                                  )}
+
+                                                  <div className="shrink-0">
+                                                    {day.rechecksCount > 0 ? (
+                                                      <span className="bg-rose-50 text-rose-700 px-1.5 py-0.5 rounded text-[8.5px] font-black border border-rose-100 whitespace-nowrap">
+                                                        إعادة جرد {day.rechecksCount} صنف ({day.totalStorekeeperModifications + day.totalSupervisorCorrections + day.totalManagerCorrections} تعديل)
+                                                      </span>
+                                                    ) : (
+                                                      <span className="bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded text-[8.5px] font-bold border border-emerald-100 whitespace-nowrap">
+                                                        ✓ لم يستدعِ أي تعديل
+                                                      </span>
+                                                    )}
                                                   </div>
                                                 </div>
 
-                                                {/* Left Part: Stats */}
-                                                <div className="flex flex-wrap items-center justify-between sm:justify-start gap-4 text-slate-500 font-medium shrink-0 border-t border-slate-100 pt-2 lg:border-t-0 lg:pt-0 w-full lg:w-auto">
-                                                  <div className="w-16 text-center">
-                                                    <div className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">الأصناف المجرودة</div>
-                                                    <div className="font-mono font-black text-[10px] text-slate-700">{day.totalItems}</div>
+                                                {/* Left Side: Stats */}
+                                                <div className="flex items-center gap-4 text-slate-500 font-medium shrink-0 pr-3 border-r border-slate-100">
+                                                  <div className="flex flex-col items-center min-w-[35px]">
+                                                    <span className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">الأصناف</span>
+                                                    <span className="font-mono font-black text-[9.5px] text-slate-700">{day.totalItems}</span>
                                                   </div>
-                                                  
-                                                  <div className="w-16 text-center">
-                                                    <div className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">تعديلات الأمين</div>
-                                                    <div className="font-mono font-black text-[10px] text-orange-600">{day.totalStorekeeperModifications}</div>
+                                                  <div className="flex flex-col items-center min-w-[35px]">
+                                                    <span className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">الأمين</span>
+                                                    <span className="font-mono font-black text-[9.5px] text-orange-600">{day.totalStorekeeperModifications}</span>
                                                   </div>
-
-                                                  <div className="w-16 text-center">
-                                                    <div className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">تعديلات المشرفين</div>
-                                                    <div className="font-mono font-black text-[10px] text-indigo-600">{day.totalSupervisorCorrections}</div>
+                                                  <div className="flex flex-col items-center min-w-[35px]">
+                                                    <span className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">المشرف</span>
+                                                    <span className="font-mono font-black text-[9.5px] text-indigo-600">{day.totalSupervisorCorrections}</span>
                                                   </div>
-
-                                                  <div className="w-16 text-center">
-                                                    <div className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">تعديلات المسئول</div>
-                                                    <div className="font-mono font-black text-[10px] text-rose-600">{day.totalManagerCorrections}</div>
+                                                  <div className="flex flex-col items-center min-w-[35px]">
+                                                    <span className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">المسئول</span>
+                                                    <span className="font-mono font-black text-[9.5px] text-rose-600">{day.totalManagerCorrections}</span>
                                                   </div>
-
-                                                  <div className="w-16 text-center">
-                                                    <div className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">انحرافات اليوم</div>
-                                                    <div className="font-mono font-black text-[10px] text-rose-600">{day.totalVariance}</div>
+                                                  <div className="flex flex-col items-center min-w-[35px]">
+                                                    <span className="text-[7px] text-rose-400 font-bold leading-none mb-0.5">الانحراف</span>
+                                                    <span className="font-mono font-black text-[9.5px] text-rose-600">{day.totalVariance}</span>
                                                   </div>
                                                 </div>
                                               </div>
@@ -2571,7 +2696,7 @@ export default function StoresManagerDashboard({
                                   </td>
                                 </tr>
 
-                                {/* Expandable Row: Supervisor Shift Log details (CRITICAL USER REQUEST) */}
+                                {/* Expandable Row: Supervisor Shift Log details */}
                                 <AnimatePresence initial={false}>
                                   {isExpanded && (
                                     <tr>
@@ -2591,84 +2716,60 @@ export default function StoresManagerDashboard({
                                             {sup.dailyHistory.map((day: any, hidx: number) => (
                                               <div 
                                                 key={hidx} 
-                                                className="bg-white px-4 py-3 rounded-lg border border-slate-150 flex flex-col lg:flex-row lg:items-center justify-between gap-4 text-[11px] hover:bg-slate-50/50 transition-colors w-full"
+                                                className="bg-white px-3 py-1.5 rounded-lg border border-slate-150 flex items-center justify-between gap-2 text-[10px] hover:bg-slate-50/50 transition-colors w-full overflow-x-auto scrollbar-none"
                                               >
-                                                <div className="flex flex-col sm:flex-row sm:items-center gap-4 w-full lg:w-auto">
-                                                  {/* Right Part: Date & Session */}
-                                                  <div className="flex items-center gap-3 min-w-[130px] shrink-0">
-                                                    <span className="font-mono text-[10.5px] text-indigo-950 font-black flex items-center gap-1">
-                                                      <Calendar className="w-3.5 h-3.5 text-slate-400" />
+                                                {/* Right: Basic Info */}
+                                                <div className="flex items-center gap-3 shrink-0">
+                                                  <div className="flex flex-col min-w-[70px]">
+                                                    <span className="font-mono text-[10px] text-indigo-950 font-black flex items-center gap-1">
+                                                      <Calendar className="w-3 h-3 text-slate-400" />
                                                       {day.date}
                                                     </span>
-                                                    <span className="text-slate-400 font-bold truncate max-w-[100px]">
+                                                    <span className="text-[8px] text-slate-400 font-bold truncate max-w-[80px]">
                                                       {day.sessionName}
                                                     </span>
                                                   </div>
 
-                                                  {/* Middle Part: Notes & Status */}
-                                                  <div className="flex items-center gap-3 overflow-hidden">
-                                                    {day.notes && (
-                                                      <div className="min-w-[120px] max-w-[220px] shrink-0">
-                                                        <div className="text-[7px] text-amber-500 font-black leading-none mb-0.5">الملاحظات</div>
-                                                        <div className="bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded border border-amber-100 text-[8.5px] leading-tight truncate" title={day.notes}>
-                                                          {day.notes}
-                                                        </div>
-                                                      </div>
-                                                    )}
-
-                                                    <div className="shrink-0">
-                                                      {day.recountsCount > 0 ? (
-                                                        <div className="flex flex-col gap-0.5">
-                                                          <span className="bg-amber-50 text-amber-700 px-2 py-0.5 rounded text-[9px] font-black border border-amber-100 whitespace-nowrap">
-                                                            تمت اعادة جرد {day.recountsCount} صنف باجمالي تعديلات {day.totalStorekeeperModifications + day.totalSupervisorCorrections + day.totalManagerCorrections}
-                                                          </span>
-                                                          {/* Detailed supervisor mods if available (Show only supervisor mods as per user request) */}
-                                                          {day.totalSupervisorCorrections > 0 && (
-                                                            <div className="flex flex-wrap gap-1 max-w-[300px]">
-                                                              {sup.history
-                                                                .filter((h: any) => h.date === day.date && h.sessionName === day.sessionName && h.totalSupervisorCorrections > 0)
-                                                                .map((h: any, midx: number) => (
-                                                                  <span key={midx} className="bg-indigo-50 text-indigo-700 border border-indigo-100 px-1 rounded text-[7px] font-bold">
-                                                                    {h.storekeeper} ➔ {h.supervisor}
-                                                                  </span>
-                                                                ))}
-                                                            </div>
-                                                          )}
-                                                        </div>
-                                                      ) : (
-                                                        <span className="bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded text-[9px] font-bold border border-emerald-100 whitespace-nowrap">
-                                                          ✓ تطابق فوري وتصديق مع الأمناء
-                                                        </span>
-                                                      )}
+                                                  {day.notes && (
+                                                    <div className="bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded border border-amber-100 text-[8.5px] max-w-[100px] truncate" title={day.notes}>
+                                                      {day.notes}
                                                     </div>
+                                                  )}
+
+                                                  <div className="shrink-0">
+                                                    {day.recountsCount > 0 ? (
+                                                      <span className="bg-rose-50 text-rose-700 px-1.5 py-0.5 rounded text-[8.5px] font-black border border-rose-100 whitespace-nowrap">
+                                                        إعادة جرد {day.recountsCount} صنف ({day.totalStorekeeperModifications + day.totalSupervisorCorrections + day.totalManagerCorrections} تعديل)
+                                                      </span>
+                                                    ) : (
+                                                      <span className="bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded text-[8.5px] font-bold border border-emerald-100 whitespace-nowrap">
+                                                        ✓ تطابق فوري وتصديق مع الأمناء
+                                                      </span>
+                                                    )}
                                                   </div>
                                                 </div>
 
-                                                {/* Left Part: Stats */}
-                                                <div className="flex flex-wrap items-center justify-between sm:justify-start gap-4 text-slate-500 font-medium shrink-0 border-t border-slate-100 pt-2 lg:border-t-0 lg:pt-0 w-full lg:w-auto">
-                                                  <div className="w-16 text-center">
-                                                    <div className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">الأصناف المدققة</div>
-                                                    <div className="font-mono font-black text-[10px] text-slate-700">{day.totalItems}</div>
+                                                {/* Left: All Stats in one row */}
+                                                <div className="flex items-center gap-2.5 text-slate-500 font-medium shrink-0 pr-2 border-r border-slate-100">
+                                                  <div className="flex flex-col items-center min-w-[35px]">
+                                                    <span className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">أصناف</span>
+                                                    <span className="font-mono font-black text-[10px] text-slate-700">{day.totalItems}</span>
                                                   </div>
-                                                  
-                                                  <div className="w-16 text-center">
-                                                    <div className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">تعديلات الأمين</div>
-                                                    <div className="font-mono font-black text-[10px] text-orange-600">{(day as any).totalStorekeeperModifications || 0}</div>
+                                                  <div className="flex flex-col items-center min-w-[35px]">
+                                                    <span className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">أمين</span>
+                                                    <span className="font-mono font-black text-[10px] text-orange-600">{(day as any).totalStorekeeperModifications || 0}</span>
                                                   </div>
-
-                                                  <div className="w-16 text-center">
-                                                    <div className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">تعديلات المشرفين</div>
-                                                    <div className="font-mono font-black text-[10px] text-indigo-600">{(day as any).totalSupervisorCorrections || 0}</div>
+                                                  <div className="flex flex-col items-center min-w-[35px]">
+                                                    <span className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">مشرف</span>
+                                                    <span className="font-mono font-black text-[10px] text-indigo-600">{(day as any).totalSupervisorCorrections || 0}</span>
                                                   </div>
-
-                                                  <div className="w-16 text-center">
-                                                    <div className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">تعديلات المسئول</div>
-                                                    <div className="font-mono font-black text-[10px] text-rose-600">{(day as any).totalManagerCorrections || 0}</div>
+                                                  <div className="flex flex-col items-center min-w-[35px]">
+                                                    <span className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">مسئول</span>
+                                                    <span className="font-mono font-black text-[10px] text-rose-600">{(day as any).totalManagerCorrections || 0}</span>
                                                   </div>
-
-                                                  <div className="w-16 text-center">
-                                                    <div className="text-[7px] text-slate-400 font-bold leading-none mb-0.5">انحرافات الوردية</div>
-                                                    <div className="font-mono font-black text-[10px] text-rose-600">{day.totalVariance}</div>
+                                                  <div className="flex flex-col items-center min-w-[35px]">
+                                                    <span className="text-[7px] text-rose-400 font-bold leading-none mb-0.5">انحراف</span>
+                                                    <span className="font-mono font-black text-[10px] text-rose-600">{(day as any).totalVariance || 0}</span>
                                                   </div>
                                                 </div>
                                               </div>
@@ -2710,8 +2811,8 @@ export default function StoresManagerDashboard({
                 <table className="w-full text-right text-[11px] font-sans border-collapse min-w-[850px]">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-150 text-slate-600 font-black h-11">
-                      <th className="pr-4 py-2 w-32">تاريخ الجرد</th>
-                      <th className="px-3 py-2 min-w-[180px]">نسخة الجرد</th>
+                      <th className="pr-4 py-2 w-44">تاريخ الجرد</th>
+                      <th className="px-3 py-2 min-w-[200px]">نسخة الجرد</th>
                       <th className="px-3 py-2 w-32 text-center">الأصناف المسندة</th>
                       <th className="px-3 py-2 w-32 text-center">أصناف تم جردها</th>
                       <th className="px-3 py-2 w-32 text-center">تعديلات الأمين</th>
@@ -2732,12 +2833,12 @@ export default function StoresManagerDashboard({
                           key={time.id}
                           className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors h-11"
                         >
-                          <td className="pr-4 py-2 font-mono text-[10.5px] text-indigo-950 font-black flex items-center gap-1.5 h-11">
+                          <td className="pr-4 py-2 font-mono text-[10.5px] text-indigo-950 font-black flex items-center gap-1.5 h-11 whitespace-nowrap min-w-[160px]">
                             <Calendar className="w-3.5 h-3.5 text-slate-400" />
                             {time.date}
                           </td>
-                          <td className="px-3 py-2 text-slate-800 font-bold">
-                            {time.sessionName || "وردية جرد عام"}
+                          <td className="px-3 py-2 text-slate-800 font-bold font-mono text-[10px]">
+                            {time.sessionId || time.sessionName || "وردية جرد عام"}
                           </td>
                           <td className="px-3 py-2 text-center font-mono font-bold text-slate-700">{time.totalAssigned} صنفاً</td>
                           <td className="px-3 py-2 text-center font-mono font-bold text-indigo-600">{time.totalSubmitted}</td>
@@ -2797,122 +2898,96 @@ export default function StoresManagerDashboard({
               className="space-y-6 font-sans text-right"
               dir="rtl"
             >
-              {/* Header Card */}
-              <div className="bg-linear-to-r from-indigo-950 via-slate-900 to-indigo-900 p-6 rounded-3xl border border-indigo-900/40 text-white shadow-xl relative overflow-hidden">
-                <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
-                <div className="absolute bottom-0 left-0 w-80 h-80 bg-emerald-500/5 rounded-full blur-3xl pointer-events-none" />
-                
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 relative z-10">
-                  <div className="space-y-1.5">
-                    <div className="flex items-center gap-2">
-                      <span className="bg-indigo-500/20 text-indigo-300 border border-indigo-400/30 px-3 py-1 rounded-full text-[10px] font-black tracking-wider flex items-center gap-1.5 shadow-3xs animate-pulse">
-                        <Sparkles className="w-3.5 h-3.5" />
-                        نظام التحليل الإحصائي والتنبؤ المدعوم بالذكاء الاصطناعي
-                      </span>
-                    </div>
-                    <h2 className="text-xl sm:text-2xl font-black tracking-tight leading-none text-transparent bg-clip-text bg-linear-to-r from-white via-indigo-100 to-emerald-200">
-                      لوحة تقييم الجرد ومكافحة الانحرافات الذكية
-                    </h2>
-                    <p className="text-xs text-indigo-200/80 font-medium leading-relaxed max-w-2xl">
-                      يستخدم هذا النظام تتبعاً تاريخياً مستمراً للأصناف والأفراد لعزل الانحرافات النظامية والمخالفات الدورية (مثل عجز الإنتاج والتنزيل) عن الأخطاء البشرية الحقيقية في الجرد، لتوفير تقييم ذكي وعادل دائم للأمناء والمشرفين.
-                    </p>
-                  </div>
+              {/* Power BI KPI Dashboard Row */}
+              <div className="flex flex-col gap-3">
+                {/* Card 1: Overall Accuracy */}
+                <div className="bg-white px-5 py-4 rounded-2xl border border-slate-150 shadow-sm hover:shadow-md transition-all group relative overflow-hidden flex flex-row items-center justify-between gap-4">
+                  <div className="absolute top-0 right-0 w-24 h-full bg-emerald-50/30 rounded-full blur-3xl pointer-events-none group-hover:bg-emerald-100/50 transition-colors" />
                   
-                  <div className="flex items-center gap-2 shrink-0">
-                    <span className="bg-white/10 hover:bg-white/15 px-3 py-2 rounded-xl border border-white/10 text-xs font-bold font-mono text-emerald-300 flex items-center gap-1.5">
-                      <Activity className="w-4 h-4 text-emerald-400" />
-                      مؤشر استقرار المستودع: {
-                        smartAnalyticsData.storekeeperEvaluations.length > 0 
-                          ? `${Math.round(smartAnalyticsData.storekeeperEvaluations.reduce((acc, curr) => acc + curr.score, 0) / smartAnalyticsData.storekeeperEvaluations.length)}%` 
-                          : "100%"
+                  <div className="flex items-center gap-4 relative z-10">
+                    <div className="p-2.5 rounded-xl bg-emerald-50 text-emerald-600 border border-emerald-100 shrink-0 shadow-3xs">
+                      <TrendingUp className="w-5 h-5" />
+                    </div>
+                    <div className="flex flex-col">
+                      <span className="text-xs text-slate-800 font-black">معدل دقة الجرد الإجمالي</span>
+                      <p className="text-[10px] text-slate-400 font-bold">تتبع تاريخي لـ {smartAnalyticsData.globalMetrics.totalSessions} جلسات جردية متعاقبة</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3 relative z-10">
+                    <span className="text-[10px] font-black text-emerald-600 bg-emerald-50/80 px-2 py-0.5 rounded-lg border border-emerald-100/50">مستقر</span>
+                    <span className="font-mono text-2xl font-black text-slate-800 leading-none">
+                      {smartAnalyticsData.globalMetrics.accuracyTrend.length > 0 
+                        ? `${smartAnalyticsData.globalMetrics.accuracyTrend[smartAnalyticsData.globalMetrics.accuracyTrend.length - 1].accuracy}%`
+                        : "92%"
                       }
                     </span>
                   </div>
                 </div>
-              </div>
-
-              {/* Power BI KPI Dashboard Row */}
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                {/* Card 1: Overall Accuracy */}
-                <div className="bg-white p-5 rounded-2xl border border-slate-150 shadow-sm hover:shadow-md transition-all group relative overflow-hidden flex flex-col justify-between h-[115px]">
-                  <div className="absolute top-0 right-0 w-20 h-20 bg-emerald-50 rounded-full blur-2xl pointer-events-none group-hover:bg-emerald-100/50 transition-colors" />
-                  <div className="flex justify-between items-start">
-                    <span className="text-[11px] text-slate-455 font-black">معدل دقة الجرد الإجمالي</span>
-                    <div className="p-1.5 rounded-lg bg-emerald-50 text-emerald-600 border border-emerald-100 shrink-0">
-                      <TrendingUp className="w-4 h-4" />
-                    </div>
-                  </div>
-                  <div>
-                    <div className="flex items-baseline gap-1.5">
-                      <span className="font-mono text-2xl font-black text-slate-800 leading-none">
-                        {smartAnalyticsData.globalMetrics.accuracyTrend.length > 0 
-                          ? `${smartAnalyticsData.globalMetrics.accuracyTrend[smartAnalyticsData.globalMetrics.accuracyTrend.length - 1].accuracy}%`
-                          : "92%"
-                        }
-                      </span>
-                      <span className="text-[9px] font-black text-emerald-600 bg-emerald-50/80 px-1.5 py-0.5 rounded">مستقر</span>
-                    </div>
-                    <p className="text-[9px] text-slate-400 font-bold mt-1">تتبع تاريخي لـ {smartAnalyticsData.globalMetrics.totalSessions} جلسات جردية متعاقبة</p>
-                  </div>
-                </div>
 
                 {/* Card 2: Total Items */}
-                <div className="bg-white p-5 rounded-2xl border border-slate-150 shadow-sm hover:shadow-md transition-all group relative overflow-hidden flex flex-col justify-between h-[115px]">
-                  <div className="absolute top-0 right-0 w-20 h-20 bg-indigo-50 rounded-full blur-2xl pointer-events-none group-hover:bg-indigo-100/50 transition-colors" />
-                  <div className="flex justify-between items-start">
-                    <span className="text-[11px] text-slate-455 font-black">إجمالي الأصناف المقيمة</span>
-                    <div className="p-1.5 rounded-lg bg-indigo-50 text-indigo-600 border border-indigo-100 shrink-0">
-                      <Package className="w-4 h-4" />
+                <div className="bg-white px-5 py-4 rounded-2xl border border-slate-150 shadow-sm hover:shadow-md transition-all group relative overflow-hidden flex flex-row items-center justify-between gap-4">
+                  <div className="absolute top-0 right-0 w-24 h-full bg-indigo-50/30 rounded-full blur-3xl pointer-events-none group-hover:bg-indigo-100/50 transition-colors" />
+                  
+                  <div className="flex items-center gap-4 relative z-10">
+                    <div className="p-2.5 rounded-xl bg-indigo-50 text-indigo-600 border border-indigo-100 shrink-0 shadow-3xs">
+                      <Package className="w-5 h-5" />
+                    </div>
+                    <div className="flex flex-col">
+                      <span className="text-xs text-slate-800 font-black">إجمالي الأصناف المقيمة</span>
+                      <p className="text-[10px] text-indigo-500 font-bold">تم إخضاعها بالكامل للتحليل وتصفية القيم الشاذة</p>
                     </div>
                   </div>
-                  <div>
-                    <div className="flex items-baseline gap-1.5">
-                      <span className="font-mono text-2xl font-black text-slate-800 leading-none">
-                        {smartAnalyticsData.globalMetrics.totalEvaluatedItems}
-                      </span>
-                      <span className="text-[9px] text-slate-400 font-bold">صنف فرعي</span>
-                    </div>
-                    <p className="text-[9px] text-indigo-500 font-bold mt-1">تم إخضاعها بالكامل للتحليل وتصفية القيم الشاذة</p>
+
+                  <div className="flex items-center gap-3 relative z-10">
+                    <span className="text-[10px] text-slate-400 font-bold">صنف فرعي</span>
+                    <span className="font-mono text-2xl font-black text-slate-800 leading-none">
+                      {smartAnalyticsData.globalMetrics.totalEvaluatedItems}
+                    </span>
                   </div>
                 </div>
 
                 {/* Card 3: Systemic Excused */}
-                <div className="bg-white p-5 rounded-2xl border border-slate-150 shadow-sm hover:shadow-md transition-all group relative overflow-hidden flex flex-col justify-between h-[115px]">
-                  <div className="absolute top-0 right-0 w-20 h-20 bg-blue-50 rounded-full blur-2xl pointer-events-none group-hover:bg-blue-100/50 transition-colors" />
-                  <div className="flex justify-between items-start">
-                    <span className="text-[11px] text-slate-455 font-black">الانحرافات النظامية المستبعدة</span>
-                    <div className="p-1.5 rounded-lg bg-blue-50 text-blue-600 border border-blue-100 shrink-0">
-                      <Shield className="w-4 h-4" />
+                <div className="bg-white px-5 py-4 rounded-2xl border border-slate-150 shadow-sm hover:shadow-md transition-all group relative overflow-hidden flex flex-row items-center justify-between gap-4">
+                  <div className="absolute top-0 right-0 w-24 h-full bg-blue-50/30 rounded-full blur-3xl pointer-events-none group-hover:bg-blue-100/50 transition-colors" />
+                  
+                  <div className="flex items-center gap-4 relative z-10">
+                    <div className="p-2.5 rounded-xl bg-blue-50 text-blue-600 border border-blue-100 shrink-0 shadow-3xs">
+                      <Shield className="w-5 h-5" />
+                    </div>
+                    <div className="flex flex-col">
+                      <span className="text-xs text-slate-800 font-black">الانحرافات النظامية المستبعدة</span>
+                      <p className="text-[10px] text-slate-400 font-bold">فروقات معزولة (أخطاء انتاج / خطأ تحميل) تم تبرئة الأمين منها</p>
                     </div>
                   </div>
-                  <div>
-                    <div className="flex items-baseline gap-1.5">
-                      <span className="font-mono text-2xl font-black text-slate-800 leading-none">
-                        {smartAnalyticsData.globalMetrics.totalSystemicExcused}
-                      </span>
-                      <span className="text-[9px] font-black text-blue-600 bg-blue-50/80 px-1.5 py-0.5 rounded">معفاة</span>
-                    </div>
-                    <p className="text-[9px] text-slate-400 font-bold mt-1">فروقات معزولة (أخطاء انتاج / خطأ تحميل) تم تبرئة الأمين منها</p>
+
+                  <div className="flex items-center gap-3 relative z-10">
+                    <span className="text-[10px] font-black text-blue-600 bg-blue-50/80 px-2 py-0.5 rounded-lg border border-blue-100/50">معفاة إحصائياً</span>
+                    <span className="font-mono text-2xl font-black text-slate-800 leading-none">
+                      {smartAnalyticsData.globalMetrics.totalSystemicExcused}
+                    </span>
                   </div>
                 </div>
 
                 {/* Card 4: Human Errors */}
-                <div className="bg-white p-5 rounded-2xl border border-slate-150 shadow-sm hover:shadow-md transition-all group relative overflow-hidden flex flex-col justify-between h-[115px]">
-                  <div className="absolute top-0 right-0 w-20 h-20 bg-rose-50 rounded-full blur-2xl pointer-events-none group-hover:bg-rose-100/50 transition-colors" />
-                  <div className="flex justify-between items-start">
-                    <span className="text-[11px] text-slate-455 font-black">أخطاء جرد بشرية مرصودة</span>
-                    <div className="p-1.5 rounded-lg bg-rose-50 text-rose-600 border border-rose-100 shrink-0">
-                      <AlertTriangle className="w-4 h-4" />
+                <div className="bg-white px-5 py-4 rounded-2xl border border-slate-150 shadow-sm hover:shadow-md transition-all group relative overflow-hidden flex flex-row items-center justify-between gap-4">
+                  <div className="absolute top-0 right-0 w-24 h-full bg-rose-50/30 rounded-full blur-3xl pointer-events-none group-hover:bg-rose-100/50 transition-colors" />
+                  
+                  <div className="flex items-center gap-4 relative z-10">
+                    <div className="p-2.5 rounded-xl bg-rose-50 text-rose-600 border border-rose-100 shrink-0 shadow-3xs">
+                      <AlertTriangle className="w-5 h-5" />
+                    </div>
+                    <div className="flex flex-col">
+                      <span className="text-xs text-slate-800 font-black">أخطاء جرد بشرية مرصودة</span>
+                      <p className="text-[10px] text-slate-455 font-bold">تؤثر سلباً على تقييم الأمين نظراً لعدم وجود مبرر تاريخي</p>
                     </div>
                   </div>
-                  <div>
-                    <div className="flex items-baseline gap-1.5">
-                      <span className="font-mono text-2xl font-black text-slate-800 leading-none text-rose-600">
-                        {smartAnalyticsData.globalMetrics.totalHumanErrors}
-                      </span>
-                      <span className="text-[9px] font-black text-rose-600 bg-rose-50 px-1.5 py-0.5 rounded">انحراف غير مبرر</span>
-                    </div>
-                    <p className="text-[9px] text-slate-455 font-bold mt-1">تؤثر سلباً على تقييم الأمين نظراً لعدم وجود مبرر تاريخي</p>
+
+                  <div className="flex items-center gap-3 relative z-10">
+                    <span className="text-[10px] font-black text-rose-600 bg-rose-50/80 px-2 py-0.5 rounded-lg border border-rose-100/50">انحراف غير مبرر</span>
+                    <span className="font-mono text-2xl font-black text-rose-600 leading-none">
+                      {smartAnalyticsData.globalMetrics.totalHumanErrors}
+                    </span>
                   </div>
                 </div>
               </div>

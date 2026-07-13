@@ -222,22 +222,6 @@ export class SessionService {
           };
         });
 
-        // Safe Fallback: Append any database items that were NOT part of incoming.masterItems to the end of the list
-        const incomingIds = new Set(incoming.masterItems.map((i: any) => String(i.id || i.itemId)));
-        dbItems.forEach((existing) => {
-          const idStr = String(existing.id);
-          if (!incomingIds.has(idStr)) {
-            finalItemsToSave.push({
-              id: idStr,
-              name: existing.name || "بند غير مسمى",
-              category: existing.category || "عام",
-              bookQty: existing.bookQty !== undefined ? Number(existing.bookQty) : 0,
-              unit: existing.unit || "كجم",
-              previousDiff: existing.previousDiff !== undefined ? Number(existing.previousDiff) : 0,
-            });
-          }
-        });
-
         // Wipe the database catalog table and insert the resolved final list synchronously
         dbService.run("DELETE FROM inventory"); // Wipe to reload atomic list safely
         const insertItem = dbService.run.bind(dbService, `
@@ -393,6 +377,8 @@ export class SessionService {
                       inventoriedByCode: incomingItem.inventoriedByCode || existingItem.inventoriedByCode,
                       inventoriedByName: incomingItem.inventoriedByName || existingItem.inventoriedByName,
                       inventoriedAt: incomingItem.inventoriedAt || existingItem.inventoriedAt,
+                      varianceReason: incomingItem.varianceReason !== undefined ? incomingItem.varianceReason : existingItem.varianceReason,
+                      varianceNotes: incomingItem.varianceNotes !== undefined ? incomingItem.varianceNotes : existingItem.varianceNotes,
                       ...(incomingItem.itemHistory ? { itemHistory: incomingItem.itemHistory } : {})
                     };
                     return mergedSK;
@@ -415,6 +401,8 @@ export class SessionService {
                   notes: incomingItem.notes || existingItem.notes,
                   submitted: incomingItem.submitted !== undefined ? incomingItem.submitted : existingItem.submitted,
                   submittedAt: incomingItem.submittedAt !== undefined ? incomingItem.submittedAt : existingItem.submittedAt,
+                  varianceReason: incomingItem.varianceReason !== undefined ? incomingItem.varianceReason : existingItem.varianceReason,
+                  varianceNotes: incomingItem.varianceNotes !== undefined ? incomingItem.varianceNotes : existingItem.varianceNotes,
                   ...(isPhysicalQtyChanged ? {
                     inventoriedByCode: incomingItem.inventoriedByCode,
                     inventoriedByName: incomingItem.inventoriedByName,

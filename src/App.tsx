@@ -1848,6 +1848,9 @@ export default function App() {
 
   useEffect(() => {
     checkSystemStatus();
+    // 🔄 Auto-healing and continuous sync checking in the background
+    const interval = setInterval(checkSystemStatus, 10000); // Check every 10 seconds
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -3538,11 +3541,14 @@ export default function App() {
           }
         });
 
-        if (itemChanges.length > 0) {
+        const dateChanged = originalSession.date !== sessionToSave.date;
+
+        if (itemChanges.length > 0 || dateChanged) {
           const modEntry = {
             modifiedBy: user.name,
             modifiedAt: new Date().toISOString(),
-            itemChanges
+            itemChanges,
+            dateChange: dateChanged ? { oldDate: originalSession.date, newDate: sessionToSave.date } : undefined
           };
           sessionToSave = {
             ...sessionToSave,
@@ -3862,10 +3868,7 @@ export default function App() {
       return imp;
     });
     
-    // Append items that were in the catalog but NOT in the new Excel sheet to the end
-    const missingFromImport = masterItems.filter(m => !importedIds.has(m.id));
-    
-    const finalMaster = [...updatedImported, ...missingFromImport];
+    const finalMaster = updatedImported;
     
     handleUpdateMasterAndSync(finalMaster);
     showToast(`تم استيراد ${imported.length} صنف بنجاح من ورقة الإكسل ومزامنتها بالفور!`, "success");
@@ -5987,10 +5990,10 @@ export default function App() {
               </div>
             </div>
 
-          <div className="flex items-center justify-between w-full gap-1 pt-0 mt-0">
+          <div className="flex items-center justify-between w-full gap-1 py-0.5 my-0.5">
             
             {/* Main Center Area: Username & Role + Actions */}
-            <div className="flex flex-col flex-grow py-0 gap-1.5 min-w-0">
+            <div className="flex flex-col flex-grow py-0 gap-1 min-w-0">
               
               {/* Top row: Right Info (Username) & Left Actions (Edit Profile + User Options) */}
               <div className="flex items-center justify-between w-full px-1 bg-transparent border-0 mt-0">
@@ -6275,19 +6278,19 @@ export default function App() {
       </header>
 
       {/* Unified Main Interface Area */}
-      <main className={`w-full px-0.5 sm:px-1 ${isNonAdminSalatMessageVisible ? '' : 'flex-1'} flex flex-col min-h-0 py-1.5 space-y-1`}>
+      <main className={`w-full px-0.5 sm:px-1 ${isNonAdminSalatMessageVisible ? '' : 'flex-1'} flex flex-col min-h-0 pt-0 pb-1.5 space-y-1`}>
         {(() => {
           const hasLeftColumnContent = 
             (user?.role === 'program_manager' && activeProgramManagerTab !== 'none' && activeProgramManagerTab !== 'archive') ||
             ((user?.role === 'warehouse_supervisor' || user?.role === 'supervisor') && activeSupervisorTab === 'sheet') ||
             (user?.role === 'storekeeper' && activeStorekeeperTab === 'sheet');
           return (
-            <div className="space-y-1.5">
+            <div className="space-y-0.5">
 
               {/* Layout Grid: Right Side (Worksheet/Direct matching) & Left Side (Actions/Adding SKU/Archives) */}
-              <div className={hasLeftColumnContent ? "grid grid-cols-1 lg:grid-cols-3 gap-2" : "block space-y-2"}>
+              <div className={hasLeftColumnContent ? "grid grid-cols-1 lg:grid-cols-3 gap-2" : "block space-y-0.5"}>
                 {/* RIGHT SIDE: Active Audit/Matching registry grid or Selected Section */}
-                <div className={hasLeftColumnContent ? "lg:col-span-2 space-y-1.5" : "w-full space-y-1.5"}>
+                <div className={hasLeftColumnContent ? "lg:col-span-2 space-y-1.5" : "w-full space-y-0.5"}>
                   {((user?.role === 'program_manager' && activeProgramManagerTab === 'archive') ||
                     ((user?.role === 'supervisor' || user?.role === 'warehouse_supervisor' || user?.role === 'stores_manager') && activeSupervisorTab === 'archive') ||
                     (user?.role === 'storekeeper' && activeStorekeeperTab === 'archive')) ? (
@@ -7130,6 +7133,7 @@ export default function App() {
                                                 };
                                                 setActiveSession(updatedSession);
                                                 localStorage.setItem("inventory_active_session", JSON.stringify(updatedSession));
+                                                setHasUnsavedChanges(true);
                                                 pushStateToServer({ activeSession: updatedSession }, { isExplicitAction: false });
                                               }
                                             }}
@@ -7864,8 +7868,29 @@ export default function App() {
                   <Calendar className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-slate-800 text-[12px] sm:text-sm">
-                    تقرير جرد يوم : {new Date(inspectSession.date).toLocaleDateString("ar-EG", { year: "numeric", month: "short", day: "numeric" })}
+                  <h3 className="font-bold text-slate-800 text-[12px] sm:text-sm flex items-center gap-2">
+                    <span>تقرير جرد يوم :</span>
+                    {(isEditingInspectSession && user?.role === 'program_manager') ? (
+                      <input
+                        type="date"
+                        value={inspectSession.date ? new Date(inspectSession.date).toISOString().split('T')[0] : ''}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (val) {
+                            // Keep the original time if possible, or just use the new date at noon UTC
+                            const newDate = new Date(val);
+                            newDate.setHours(12, 0, 0, 0);
+                            setInspectSession({
+                              ...inspectSession,
+                              date: newDate.toISOString()
+                            });
+                          }
+                        }}
+                        className="bg-white border border-blue-200 rounded-md px-2 py-0.5 text-[11px] sm:text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none font-sans"
+                      />
+                    ) : (
+                      <span>{new Date(inspectSession.date).toLocaleDateString("ar-EG", { year: "numeric", month: "short", day: "numeric" })}</span>
+                    )}
                   </h3>
                   <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 mt-1.5">
                     <span className="text-[9px] font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100/50 inline-flex items-center gap-1 whitespace-nowrap self-start">
@@ -8089,6 +8114,25 @@ export default function App() {
                         <div className="max-h-60 overflow-y-auto space-y-2">
                           {postArchiveMods.map((mod: any, modIdx: number) => (
                             <div key={`post-mod-group-${modIdx}`} className="space-y-2">
+                              {mod.dateChange && (
+                                <div className="bg-white p-2.5 rounded-lg border border-indigo-100/50 shadow-3xs text-[10px]">
+                                  <div className="flex justify-between items-center mb-1.5 flex-wrap gap-2 border-b border-slate-50 pb-1.5">
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-bold text-indigo-700">{mod.modifiedBy}</span>
+                                      <span className="font-mono text-[9px] bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100 flex items-center gap-1">
+                                        <span className="line-through text-slate-400">{new Date(mod.dateChange.oldDate).toLocaleDateString("ar-EG")}</span>
+                                        <span className="text-indigo-600 font-bold">➜</span>
+                                        <span className="font-bold text-slate-800">{new Date(mod.dateChange.newDate).toLocaleDateString("ar-EG")}</span>
+                                      </span>
+                                    </div>
+                                    <span className="text-[9px] text-slate-400 font-mono">{new Date(mod.modifiedAt).toLocaleString("ar-EG", { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'numeric' })}</span>
+                                  </div>
+                                  <div className="text-[10px] text-right font-medium text-slate-600 pt-0.5 flex items-center gap-1.5">
+                                    <Calendar className="w-3 h-3 text-indigo-500" />
+                                    تعديل تاريخ الجرد المؤرشف
+                                  </div>
+                                </div>
+                              )}
                               {mod.itemChanges?.map((change: any, changeIdx: number) => (
                                 <div key={`post-mod-${modIdx}-${changeIdx}`} className="bg-white p-2.5 rounded-lg border border-indigo-100/50 shadow-3xs text-[10px]">
                                   <div className="flex justify-between items-center mb-1.5 flex-wrap gap-2 border-b border-slate-50 pb-1.5">
@@ -8759,6 +8803,7 @@ export default function App() {
                         const updatedSession = { ...activeSession, items: updatedItems };
                         setActiveSession(updatedSession);
                         localStorage.setItem("inventory_active_session", JSON.stringify(updatedSession));
+                        setHasUnsavedChanges(true);
                         pushStateToServer({ activeSession: updatedSession }, { isExplicitAction: false });
                       }
                       setShowVarianceNotesModal(false);

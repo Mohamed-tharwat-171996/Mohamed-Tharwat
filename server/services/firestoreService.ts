@@ -143,6 +143,7 @@ export function reinitializeFirestore(): any {
     } catch (e) {}
   }
   firestore = null;
+  appletConfig = null; // 🔄 Force completely fresh re-reading of firebase-applet-config.json
   // Only re-enable if it's actually configured
   if (isFirestoreConfigured()) {
     isFirestoreApiDisabled = false;
@@ -167,6 +168,13 @@ export function getFirestoreInstance(): Firestore | null {
   // If permanently blocked by Google, return null immediately
   if (isFirestoreApiBlockedByGoogle) {
     return null;
+  }
+
+  // 🔄 Instantly self-heal and reconnect if configuration is restored/available
+  if (isFirestoreApiDisabled && isFirestoreConfigured()) {
+    console.log("🔥 Connection auto-healing: Config detected, enabling Firestore connection instantly!");
+    isFirestoreApiDisabled = false;
+    consecutiveFailures = 0;
   }
 
   // Self-healing check: If the API was disabled, check if the cooldown period has passed to retry
@@ -215,6 +223,7 @@ export function getFirestoreInstance(): Firestore | null {
     }
 
     if (freshConfig) {
+      appletConfig = freshConfig; // Cache it globally so we don't keep reading disk
       const apps = getApps();
       let app;
       if (apps.length === 0) {

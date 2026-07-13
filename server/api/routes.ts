@@ -988,6 +988,10 @@ router.get("/health", (req, res) => {
 // 13. System Environment Diagnostic Endpoint (For Troubleshooting)
 router.get("/diagnose", async (req, res) => {
   try {
+    console.log("🔄 /api/diagnose requested: Forcing Firestore reinitialization and self-healing...");
+    setFirestoreApiDisabled(false);
+    reinitializeFirestore();
+    
     const health = await checkFirestoreHealth();
     const resolvedUsersCollection = resolveCollectionName("users");
     const docName = FirebaseBackupService.getBackupDocumentName();
