@@ -35,6 +35,7 @@ import { initializeFirestore, getFirestore, doc, getDoc, setDoc, deleteDoc, coll
 import fs from 'fs';
 import path from 'path';
 import { AsyncLocalStorage } from 'async_hooks';
+import Database from 'better-sqlite3';
 
 export const requestEnvStorage = new AsyncLocalStorage<string>();
 
@@ -49,31 +50,134 @@ let lastFailureTime = 0;
 
 // Load config dynamically on server boot
 let appletConfig: any = null;
-try {
-  // Priority 1: Environment Variable (most secure in AI Studio)
-  const envConfig = getEnvSecret("FIREBASE_CONFIG");
-  if (envConfig && envConfig.trim().startsWith('{')) {
-    try {
-      appletConfig = JSON.parse(envConfig);
-      console.log("🔥 Firebase configuration loaded successfully from environment variable.");
-    } catch (e) {
-      console.error("⚠️ Failed to parse FIREBASE_CONFIG environment variable:", e);
-    }
-  }
 
-  // Priority 2: Config Files (fallback)
-  if (!appletConfig) {
+/**
+ * Automatically backs up, restores, and heals the Firebase configuration files
+ * from SQLite databases, hidden backups, and workspace paths.
+ * Run in real-time, instantly, with zero manual intervention required.
+ */
+export function autoHealFirebaseConfig() {
+  try {
     const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
     const backupPath = path.join(process.cwd(), 'server', 'firebase-backup-config.json');
-    if (fs.existsSync(configPath)) {
-      appletConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    } else if (fs.existsSync(backupPath)) {
-      appletConfig = JSON.parse(fs.readFileSync(backupPath, 'utf-8'));
+    const hiddenBackupPath = path.join(process.cwd(), '.firebase-hidden-backup.json');
+    
+    let configStr: string | null = null;
+    
+    // 1. Try Environment
+    const envConfig = getEnvSecret("FIREBASE_CONFIG");
+    if (envConfig && envConfig.trim().startsWith('{')) {
+      configStr = envConfig;
     }
+    
+    // 2. Try root config
+    if (!configStr && fs.existsSync(configPath)) {
+      try {
+        const content = fs.readFileSync(configPath, 'utf-8');
+        if (content.trim().startsWith('{')) {
+          configStr = content;
+        }
+      } catch (e) {}
+    }
+    
+    // 3. Try server backup
+    if (!configStr && fs.existsSync(backupPath)) {
+      try {
+        const content = fs.readFileSync(backupPath, 'utf-8');
+        if (content.trim().startsWith('{')) {
+          configStr = content;
+        }
+      } catch (e) {}
+    }
+    
+    // 4. Try hidden backup
+    if (!configStr && fs.existsSync(hiddenBackupPath)) {
+      try {
+        const content = fs.readFileSync(hiddenBackupPath, 'utf-8');
+        if (content.trim().startsWith('{')) {
+          configStr = content;
+        }
+      } catch (e) {}
+    }
+    
+    // 5. Try SQLite databases
+    if (!configStr) {
+      const dbEnvs = ['development', 'production'];
+      const projectId = "ai-studio-00951ae3-ee45-4ad1-ad2a-6733dde9830e";
+      for (const env of dbEnvs) {
+        const dbPath = path.join(process.cwd(), `inventory_${projectId}_${env}.db`);
+        if (fs.existsSync(dbPath)) {
+          try {
+            const tempDb = new Database(dbPath, { readonly: true });
+            const row = tempDb.prepare("SELECT value FROM settings WHERE key = ?").get("firebase_config") as { value: string } | undefined;
+            tempDb.close();
+            if (row && row.value && row.value.trim().startsWith('{')) {
+              configStr = row.value;
+              break;
+            }
+          } catch (e) {}
+        }
+      }
+    }
+    
+    // If we have configStr, let's write/heal it everywhere!
+    if (configStr) {
+      let parsed = null;
+      try {
+        parsed = JSON.parse(configStr);
+      } catch (e) {}
+      
+      if (parsed && parsed.apiKey) {
+        const cleanJson = JSON.stringify(parsed, null, 2);
+        
+        // Root config
+        if (!fs.existsSync(configPath) || fs.readFileSync(configPath, 'utf-8').trim() !== cleanJson.trim()) {
+          console.log("🔄 Auto-healing: Restoring firebase-applet-config.json in workspace root...");
+          fs.writeFileSync(configPath, cleanJson, 'utf-8');
+        }
+        
+        // Server backup
+        const serverDir = path.dirname(backupPath);
+        if (!fs.existsSync(serverDir)) {
+          fs.mkdirSync(serverDir, { recursive: true });
+        }
+        if (!fs.existsSync(backupPath) || fs.readFileSync(backupPath, 'utf-8').trim() !== cleanJson.trim()) {
+          console.log("🔄 Auto-healing: Restoring server/firebase-backup-config.json...");
+          fs.writeFileSync(backupPath, cleanJson, 'utf-8');
+        }
+        
+        // Hidden backup
+        if (!fs.existsSync(hiddenBackupPath) || fs.readFileSync(hiddenBackupPath, 'utf-8').trim() !== cleanJson.trim()) {
+          console.log("🔄 Auto-healing: Restoring .firebase-hidden-backup.json...");
+          fs.writeFileSync(hiddenBackupPath, cleanJson, 'utf-8');
+        }
+        
+        // SQLite databases settings table
+        const dbEnvs = ['development', 'production'];
+        const projectId = "ai-studio-00951ae3-ee45-4ad1-ad2a-6733dde9830e";
+        for (const env of dbEnvs) {
+          const dbPath = path.join(process.cwd(), `inventory_${projectId}_${env}.db`);
+          if (fs.existsSync(dbPath)) {
+            try {
+              const tempDb = new Database(dbPath);
+              tempDb.exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+              tempDb.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('firebase_config', ?)").run(cleanJson);
+              tempDb.close();
+              console.log(`💾 Saved/Healed Firebase config backup in SQLite database settings [${env}].`);
+            } catch (e) {}
+          }
+        }
+        
+        appletConfig = parsed;
+      }
+    }
+  } catch (err) {
+    console.error("⚠️ Error in autoHealFirebaseConfig:", err);
   }
-} catch (err) {
-  console.warn("⚠️ Failed to load firebase config during service init:", err);
 }
+
+// Initial Boot auto-heal
+autoHealFirebaseConfig();
 
 export function getFirestoreApiDisabled(): boolean {
   return isFirestoreApiDisabled;
@@ -121,8 +225,12 @@ export let firestore: Firestore | null = null;
 
 export function isFirestoreConfigured(): boolean {
   try {
+    // Instantly try to restore/heal the configuration files if they are missing
+    autoHealFirebaseConfig();
+
     const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
     const backupPath = path.join(process.cwd(), 'server', 'firebase-backup-config.json');
+    const hiddenBackupPath = path.join(process.cwd(), '.firebase-hidden-backup.json');
     const hasEnv = !!(
       process.env.FIREBASE_CONFIG || 
       process.env.DEVELOPMENT_FIREBASE_CONFIG || 
@@ -130,7 +238,7 @@ export function isFirestoreConfigured(): boolean {
       process.env.MASTERS_FIREBASE_CONFIG || 
       process.env.MASTER_FIREBASE_CONFIG
     );
-    return fs.existsSync(configPath) || fs.existsSync(backupPath) || hasEnv;
+    return fs.existsSync(configPath) || fs.existsSync(backupPath) || fs.existsSync(hiddenBackupPath) || hasEnv;
   } catch (e) {
     return false;
   }

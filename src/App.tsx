@@ -4899,9 +4899,15 @@ export default function App() {
                                         await loadCloudBackupMetadataOnly();
                                         
                                         if (data.status === 'ok') {
-                                          showToast("تمت محاولة إعادة الاتصال بنجاح وتنشيط السحاب.", "success");
+                                          if (data.cloudSyncAvailable && data.firestoreHealthy) {
+                                            showToast("تمت إعادة الاتصال بنجاح وتنشيط السحاب! ☁️✅", "success");
+                                          } else if (data.cloudSyncAvailable && !data.firestoreHealthy) {
+                                            showToast("ملف الإعدادات متصل ولكن السحابة غير نشطة (فشل الاتصال بـ Firestore).", "error");
+                                          } else {
+                                            showToast("فشل تفعيل السحاب: ملف إعدادات Firebase (firebase-applet-config.json) غير موجود بالخادم.", "error");
+                                          }
                                         } else {
-                                          showToast("فشل تفعيل السحاب: " + (data.error || "تأكد من إعدادات Firebase"), "error");
+                                          showToast("فشل تفعيل السحاب: " + (data.error || "خطأ غير معروف"), "error");
                                         }
                                       } catch (err) {
                                         showToast("حدث خطأ أثناء محاولة الاتصال بالسيرفر السحابي.", "error");
@@ -6088,16 +6094,6 @@ export default function App() {
 
                     <button
                         type="button"
-                        onClick={() => fetchStateFromServer(true, true)}
-                        className={`w-[26px] h-[26px] flex items-center justify-center border border-indigo-200 text-indigo-700 bg-white rounded-md transition-all shadow-3xs cursor-pointer shrink-0 ${isRefreshingState ? 'opacity-80 bg-slate-50' : 'hover:bg-indigo-50 hover:text-indigo-900'}`}
-                        title="مزامنة وتحديث البيانات السحابية يدوياً 🔄"
-                        disabled={isRefreshingState}
-                    >
-                        <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingState ? 'animate-spin text-indigo-500' : 'text-indigo-650'}`} />
-                    </button>
-
-                    <button
-                        type="button"
                         onClick={openEditProfileModal}
                         className="w-[26px] h-[26px] flex items-center justify-center border border-emerald-250 hover:bg-emerald-50 hover:text-emerald-850 text-emerald-700 bg-white rounded-md transition-all shadow-3xs cursor-pointer shrink-0"
                         title="تعديل البيانات الشخصية"
@@ -6245,12 +6241,14 @@ export default function App() {
                           const isStorekeeperSubmitDisabled = activeSession?.isCompleted || 
                             activeSession?.items.filter(item => item.assignedTo === user.code && !item.submitted).length === 0 ||
                             !navigator.onLine || 
-                            pendingSyncCount > 0;
+                            !isOnline ||
+                            pendingSyncCount > 0 ||
+                            isSyncingOffline;
 
                           let storekeeperSubmitTitle = "ترحيل وتسليم الكميات المدخلة للمشرف على السيرفر سحابياً";
-                          if (!navigator.onLine) {
+                          if (!navigator.onLine || !isOnline) {
                             storekeeperSubmitTitle = "⚠️ عذراً، لا يمكن حفظ وتسليم الجرد أثناء انقطاع الإنترنت! يرجى الاتصال بالإنترنت أولاً.";
-                          } else if (pendingSyncCount > 0) {
+                          } else if (pendingSyncCount > 0 || isSyncingOffline) {
                             storekeeperSubmitTitle = `⚠️ يرجى الانتظار حتى اكتمال مزامنة ${pendingSyncCount} تعديلات معلقة قبل التسليم.`;
                           }
 
@@ -6287,6 +6285,16 @@ export default function App() {
                         </div>
                       </div>
                     )}
+
+                    <button
+                        type="button"
+                        onClick={() => fetchStateFromServer(true, true)}
+                        className={`w-[26px] h-[26px] flex items-center justify-center border border-indigo-200 text-indigo-700 bg-white rounded-md transition-all shadow-3xs cursor-pointer shrink-0 ${isRefreshingState ? 'opacity-80 bg-slate-50' : 'hover:bg-indigo-50 hover:text-indigo-900'}`}
+                        title="مزامنة وتحديث البيانات السحابية يدوياً 🔄"
+                        disabled={isRefreshingState}
+                    >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingState ? 'animate-spin text-indigo-500' : 'text-indigo-650'}`} />
+                    </button>
 
                     <button
                         type="button"
@@ -7432,12 +7440,14 @@ export default function App() {
                         const isStorekeeperSubmitDisabled = activeSession?.isCompleted || 
                           activeSession?.items.filter(item => item.assignedTo === user.code && !item.submitted).length === 0 ||
                           !navigator.onLine || 
-                          pendingSyncCount > 0;
+                          !isOnline ||
+                          pendingSyncCount > 0 ||
+                          isSyncingOffline;
 
                         let storekeeperSubmitTitle = "ترحيل وتسليم الكميات المدخلة للمشرف على السيرفر سحابياً";
-                        if (!navigator.onLine) {
+                        if (!navigator.onLine || !isOnline) {
                           storekeeperSubmitTitle = "⚠️ عذراً، لا يمكن حفظ وتسليم الجرد أثناء انقطاع الإنترنت! يرجى الاتصال بالإنترنت أولاً.";
-                        } else if (pendingSyncCount > 0) {
+                        } else if (pendingSyncCount > 0 || isSyncingOffline) {
                           storekeeperSubmitTitle = `⚠️ يرجى الانتظار حتى اكتمال مزامنة ${pendingSyncCount} تعديلات معلقة قبل التسليم.`;
                         }
 
