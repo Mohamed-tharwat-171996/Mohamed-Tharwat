@@ -690,7 +690,10 @@ export class SessionService {
     if (success) {
       const forceCloud = (incoming.activeSession === null) || 
                          (incoming.deletedActiveSessionId !== undefined) || 
-                         (incoming.deletedPastSessionId !== undefined);
+                         (incoming.deletedPastSessionId !== undefined) ||
+                         (incoming.masterItems !== undefined) ||
+                         (incoming.isExplicitAction === true) ||
+                         (incoming.isExplicitDeleteOrArchive === true);
       this.writeDurableCheckpoint(forceCloud);
 
       // Async save deleted sessions to Firestore

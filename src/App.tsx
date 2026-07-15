@@ -517,6 +517,7 @@ export default function App() {
 
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [isSyncingOffline, setIsSyncingOffline] = useState(false);
+  const [isRefreshingState, setIsRefreshingState] = useState(false);
   const isSyncingOfflineRef = useRef(false);
   const [calcItem, setCalcItem] = useState<AuditItem | null>(null);
 
@@ -610,11 +611,14 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
 
+    // Disabled active 8s background auto-polling to conserve the daily Firestore quota.
+    // Instead of continuous automated reads, synchronization happens manually via the Sync button
+    // or through explicit actions. A slow 10-minute silent background pull is kept as a last-resort safeguard.
     const pullInterval = setInterval(() => {
       if (pullCallbackRef.current) {
         pullCallbackRef.current();
       }
-    }, 8000); // Poll every 8 seconds
+    }, 600000); // Poll once every 10 minutes instead of every 8 seconds
 
     return () => clearInterval(pullInterval);
   }, [user]);
@@ -682,53 +686,48 @@ export default function App() {
 
       setIsSyncingOffline(true);
       isSyncingOfflineRef.current = true;
-      console.log(`📦 Background Sync: Processing ${ops.length} pending operations...`);
+      console.log(`📦 Background Sync: Coalescing ${ops.length} pending operations into a single consolidated batch for speed...`);
       
       const token = localStorage.getItem("inventory_jwt_token");
       if (!token) {
         return;
       }
 
+      // Consolidate all operations into a single merged payload
+      const mergedPayload: any = {};
       for (const op of ops) {
-        try {
-          const res = await fetchWithTimeout("/api/data", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${token}`
-            },
-            body: JSON.stringify(op.payload)
-          }, 8000);
-
-          if (res.ok) {
-            await offlineService.removeOperation(op.id);
-            console.log(`✅ Sync Success: Operation ${op.id} moved to server.`);
-            setIsOnline(true);
-          } else {
-            op.retryCount = (op.retryCount || 0) + 1;
-            await offlineService.updateRetryCount(op.id);
-            if (op.retryCount >= 5) {
-               console.error(`Removing poisoned operation ${op.id} after 5 failed retries.`);
-               await offlineService.removeOperation(op.id);
-            }
-            // If server error (not network), we might want to skip or retry later
-            if (res.status >= 500) break; 
-          }
-        } catch (err) {
-          console.warn(`⏳ Sync Delayed: Network still unstable or server unreachable for ${op.id}`);
-          setIsOnline(false);
-          break; // Stop processing and wait for next online event or retry logic
+        if (op.payload) {
+          Object.assign(mergedPayload, op.payload);
         }
       }
 
-      const updatedOps = await offlineService.getPendingOperations();
-      setPendingSyncCount(updatedOps.length);
-      
-      if (updatedOps.length === 0) {
-        showToast("🎉 تمت مزامنة جميع البيانات المعلقة بنجاح!", "success");
-        isSyncingOfflineRef.current = false;
-        setIsSyncingOffline(false);
-        await fetchStateFromServer(true, false);
+      // Mark this coalesced synchronization as explicit to force direct SQLite -> Firestore synchronization
+      mergedPayload.isExplicitAction = true;
+
+      try {
+        const res = await fetchWithTimeout("/api/data", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`
+          },
+          body: JSON.stringify(mergedPayload)
+        }, 15000); // 15s timeout for consolidated batch
+
+        if (res.ok) {
+          await offlineService.clearQueue();
+          console.log(`✅ Consolidated Sync Success: All ${ops.length} pending operations synced to server in a single request!`);
+          setIsOnline(true);
+          setPendingSyncCount(0);
+          showToast("🎉 تمت مزامنة جميع العمليات المعلقة وتحديث البيانات بنجاح دفعة واحدة!", "success");
+          await fetchStateFromServer(true, false);
+        } else {
+          console.warn("⚠️ Consolidated Sync failed on server side. Keeping operations in queue for next retry.");
+          throw new Error("Server responded with error status: " + res.status);
+        }
+      } catch (err) {
+        console.warn("⏳ Sync Delayed: Network unstable or server unreachable during consolidated batch push.", err);
+        setIsOnline(false);
       }
     } catch (err) {
       console.error("Error in processOfflineQueue:", err);
@@ -1468,6 +1467,7 @@ export default function App() {
     if (forceUpdate && showLoader) {
       setIsDataLoaded(false);
     }
+    setIsRefreshingState(true);
     try {
       if (typeof window !== "undefined" && !navigator.onLine) {
         setIsDataLoaded(true);
@@ -1520,6 +1520,8 @@ export default function App() {
       isSyncingRef.current = false;
       // Assume local storage is enough if server fetch fails
       setIsDataLoaded(true);
+    } finally {
+      setIsRefreshingState(false);
     }
   };
 
@@ -6086,6 +6088,16 @@ export default function App() {
 
                     <button
                         type="button"
+                        onClick={() => fetchStateFromServer(true, true)}
+                        className={`w-[26px] h-[26px] flex items-center justify-center border border-indigo-200 text-indigo-700 bg-white rounded-md transition-all shadow-3xs cursor-pointer shrink-0 ${isRefreshingState ? 'opacity-80 bg-slate-50' : 'hover:bg-indigo-50 hover:text-indigo-900'}`}
+                        title="مزامنة وتحديث البيانات السحابية يدوياً 🔄"
+                        disabled={isRefreshingState}
+                    >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingState ? 'animate-spin text-indigo-500' : 'text-indigo-650'}`} />
+                    </button>
+
+                    <button
+                        type="button"
                         onClick={openEditProfileModal}
                         className="w-[26px] h-[26px] flex items-center justify-center border border-emerald-250 hover:bg-emerald-50 hover:text-emerald-850 text-emerald-700 bg-white rounded-md transition-all shadow-3xs cursor-pointer shrink-0"
                         title="تعديل البيانات الشخصية"
@@ -6229,17 +6241,32 @@ export default function App() {
                           );
                         })()}
 
-                        {user.role === 'storekeeper' && activeStorekeeperTab === 'sheet' && (
+                        {user.role === 'storekeeper' && activeStorekeeperTab === 'sheet' && (() => {
+                          const isStorekeeperSubmitDisabled = activeSession?.isCompleted || 
+                            activeSession?.items.filter(item => item.assignedTo === user.code && !item.submitted).length === 0 ||
+                            !navigator.onLine || 
+                            pendingSyncCount > 0;
+
+                          let storekeeperSubmitTitle = "ترحيل وتسليم الكميات المدخلة للمشرف على السيرفر سحابياً";
+                          if (!navigator.onLine) {
+                            storekeeperSubmitTitle = "⚠️ عذراً، لا يمكن حفظ وتسليم الجرد أثناء انقطاع الإنترنت! يرجى الاتصال بالإنترنت أولاً.";
+                          } else if (pendingSyncCount > 0) {
+                            storekeeperSubmitTitle = `⚠️ يرجى الانتظار حتى اكتمال مزامنة ${pendingSyncCount} تعديلات معلقة قبل التسليم.`;
+                          }
+
+                          return (
                             <button
-                            type="button"
-                            onClick={handleStorekeeperSubmit}
-                            disabled={activeSession?.isCompleted || activeSession?.items.filter(item => item.assignedTo === user.code && !item.submitted).length === 0}
-                            className="h-[26px] bg-emerald-600 hover:bg-emerald-750 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white rounded-xl text-[10px] font-bold flex items-center justify-center gap-1 transition-transform active:scale-95 cursor-pointer truncate px-3"
+                              type="button"
+                              onClick={handleStorekeeperSubmit}
+                              disabled={isStorekeeperSubmitDisabled}
+                              className="h-[26px] bg-emerald-600 hover:bg-emerald-750 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white rounded-xl text-[10px] font-bold flex items-center justify-center gap-1 transition-transform active:scale-95 cursor-pointer truncate px-3"
+                              title={storekeeperSubmitTitle}
                             >
-                            <Save className="w-3.5 h-3.5 shrink-0" />
-                            <span className="truncate">حفظ وتسليم الجرد 📝</span>
+                              <Save className="w-3.5 h-3.5 shrink-0" />
+                              <span className="truncate">حفظ وتسليم الجرد 📝</span>
                             </button>
-                        )}
+                          );
+                        })()}
                         </>
                     ) : null}
 
@@ -7401,22 +7428,36 @@ export default function App() {
                     </div>
 
                     <div className="space-y-2.5">
-                      <button
-                        type="button"
-                        onClick={handleStorekeeperSubmit}
-                        disabled={activeSession?.isCompleted || activeSession?.items.filter(item => item.assignedTo === user.code && !item.submitted).length === 0}
-                        className={`w-full font-extrabold text-xs py-3 rounded-xl flex items-center justify-center gap-1.5 border-0 transition-all shadow-md ${
-                          (activeSession?.isCompleted || activeSession?.items.filter(item => item.assignedTo === user.code && !item.submitted).length === 0)
-                            ? "bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none"
-                            : "bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer active:scale-95 shadow-emerald-600/10"
-                        }`}
-                        title="ترحيل وتسليم الكميات المدخلة للمشرف على السيرفر سحابياً"
-                      >
-                        <Save className="w-4 h-4" />
-                        حفظ وتسليم الجرد للمشرف 📝
-                      </button>
+                      {(() => {
+                        const isStorekeeperSubmitDisabled = activeSession?.isCompleted || 
+                          activeSession?.items.filter(item => item.assignedTo === user.code && !item.submitted).length === 0 ||
+                          !navigator.onLine || 
+                          pendingSyncCount > 0;
 
+                        let storekeeperSubmitTitle = "ترحيل وتسليم الكميات المدخلة للمشرف على السيرفر سحابياً";
+                        if (!navigator.onLine) {
+                          storekeeperSubmitTitle = "⚠️ عذراً، لا يمكن حفظ وتسليم الجرد أثناء انقطاع الإنترنت! يرجى الاتصال بالإنترنت أولاً.";
+                        } else if (pendingSyncCount > 0) {
+                          storekeeperSubmitTitle = `⚠️ يرجى الانتظار حتى اكتمال مزامنة ${pendingSyncCount} تعديلات معلقة قبل التسليم.`;
+                        }
 
+                        return (
+                          <button
+                            type="button"
+                            onClick={handleStorekeeperSubmit}
+                            disabled={isStorekeeperSubmitDisabled}
+                            className={`w-full font-extrabold text-xs py-3 rounded-xl flex items-center justify-center gap-1.5 border-0 transition-all shadow-md ${
+                              isStorekeeperSubmitDisabled
+                                ? "bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none"
+                                : "bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer active:scale-95 shadow-emerald-600/10"
+                            }`}
+                            title={storekeeperSubmitTitle}
+                          >
+                            <Save className="w-4 h-4" />
+                            حفظ وتسليم الجرد للمشرف 📝
+                          </button>
+                        );
+                      })()}
                     </div>
                   </div>
                 )}

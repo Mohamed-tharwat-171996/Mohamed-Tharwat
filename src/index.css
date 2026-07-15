@@ -27,3 +27,17 @@ body {
     color: black !important;
   }
 }
+
+/* Hide number input spinners (up/down buttons) globally and forcefully */
+input::-webkit-outer-spin-button,
+input::-webkit-inner-spin-button {
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  margin: 0 !important;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield !important;
+  appearance: textfield !important;
+}
+
