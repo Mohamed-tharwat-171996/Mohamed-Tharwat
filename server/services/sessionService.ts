@@ -421,6 +421,8 @@ export class SessionService {
                   const mergedItem = {
                     ...existingItem,
                     ...incomingItem,
+                    // Preserve submitted status unless explicitly requested as recheck
+                    submitted: incomingItem.recheckRequested === true ? false : (existingItem.submitted || incomingItem.submitted || false),
                     storekeeperQty: (existingItem.storekeeperQty !== undefined && existingItem.storekeeperQty !== null) ? existingItem.storekeeperQty : incomingItem.storekeeperQty,
                     storekeeperModifications: mergeStorekeeperModifications(existingItem.storekeeperModifications, incomingItem.storekeeperModifications)
                   };

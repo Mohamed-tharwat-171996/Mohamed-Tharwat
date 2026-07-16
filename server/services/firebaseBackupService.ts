@@ -238,8 +238,10 @@ export class FirebaseBackupService {
         INSERT INTO inventory_snapshots (session_id, date, notes, created_at, snapshot_data)
         VALUES (?, ?, ?, ?, ?)
       `);
+      const restoredPastIds: string[] = [];
       for (const sess of pastSessions) {
         if (sess && sess.id) {
+          restoredPastIds.push(String(sess.id));
           insertSnapshot([
             String(sess.id),
             sess.date || new Date().toISOString().slice(0, 10),
@@ -249,14 +251,19 @@ export class FirebaseBackupService {
           ]);
         }
       }
+      if (restoredPastIds.length > 0) {
+        dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('synced_past_session_ids', ?)", [JSON.stringify(restoredPastIds)]);
+      }
 
       // Restore deletedSessions
       const insertDeleted = dbService.run.bind(dbService, `
         INSERT INTO deleted_sessions (id, session_id, deleted_at, session_data, deleted_reason)
         VALUES (?, ?, ?, ?, ?)
       `);
+      const restoredDeletedIds: string[] = [];
       for (const del of deletedSessions) {
         if (del && del.id) {
+          restoredDeletedIds.push(String(del.sessionId || del.session_id || del.id));
           insertDeleted([
             Number(del.id),
             String(del.sessionId || del.session_id),
@@ -265,6 +272,9 @@ export class FirebaseBackupService {
             del.deletedReason || del.deleted_reason || null
           ]);
         }
+      }
+      if (restoredDeletedIds.length > 0) {
+        dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('synced_deleted_session_ids', ?)", [JSON.stringify(restoredDeletedIds)]);
       }
 
       // Restore lastUpdated setting
@@ -427,29 +437,79 @@ export class FirebaseBackupService {
         await withTimeout(setDoc(docRef, dbBackupObj), OVERRIDE_TIMEOUT_MS, "setDoc");
         let writeCount = 1;
 
-        // 📦 SYNC ARCHIVED SESSIONS INDIVIDUALLY:
+        // Load synced session IDs from SQLite to save Firestore write quota
+        let syncedPastIds: string[] = [];
+        try {
+          const row = dbService.queryOne("SELECT value FROM settings WHERE key = 'synced_past_session_ids'");
+          if (row && row.value) {
+            syncedPastIds = JSON.parse(row.value);
+          }
+        } catch (e) {
+          console.warn("Could not load synced_past_session_ids:", e);
+        }
+        const syncedPastSet = new Set(syncedPastIds.map(String));
+
+        let syncedDeletedIds: string[] = [];
+        try {
+          const row = dbService.queryOne("SELECT value FROM settings WHERE key = 'synced_deleted_session_ids'");
+          if (row && row.value) {
+            syncedDeletedIds = JSON.parse(row.value);
+          }
+        } catch (e) {
+          console.warn("Could not load synced_deleted_session_ids:", e);
+        }
+        const syncedDeletedSet = new Set(syncedDeletedIds.map(String));
+
+        let syncedTombstoneIds: string[] = [];
+        try {
+          const row = dbService.queryOne("SELECT value FROM settings WHERE key = 'synced_tombstone_ids'");
+          if (row && row.value) {
+            syncedTombstoneIds = JSON.parse(row.value);
+          }
+        } catch (e) {
+          console.warn("Could not load synced_tombstone_ids:", e);
+        }
+        const syncedTombstoneSet = new Set(syncedTombstoneIds.map(String));
+
+        // 📦 SYNC ARCHIVED SESSIONS INDIVIDUALLY (Only write if unsynced):
         if (state.pastSessions && Array.isArray(state.pastSessions)) {
           const snapshotsCollName = resolveCollectionName("inventory_snapshots");
-          console.log(`📦 Syncing ${state.pastSessions.length} archived sessions to [${snapshotsCollName}]...`);
+          let newlySyncedCount = 0;
 
           for (const sess of state.pastSessions) {
             if (sess && sess.id) {
               const sessId = String(sess.id);
+              if (syncedPastSet.has(sessId)) {
+                continue; // Skip already-synced archive to conserve write quota!
+              }
               const sessRef = doc(db, snapshotsCollName, sessId);
               await withTimeout(setDoc(sessRef, sess, { merge: true }), 5000, `sync-archive-${sessId}`);
               writeCount++;
+              syncedPastSet.add(sessId);
+              newlySyncedCount++;
+            }
+          }
+
+          if (newlySyncedCount > 0) {
+            try {
+              dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('synced_past_session_ids', ?)", [JSON.stringify(Array.from(syncedPastSet))]);
+            } catch (err) {
+              console.warn("Failed saving synced_past_session_ids:", err);
             }
           }
         }
 
-        // 🗑️ SYNC DELETED SESSIONS INDIVIDUALLY:
+        // 🗑️ SYNC DELETED SESSIONS INDIVIDUALLY (Only write if unsynced):
         if (state.deletedSessions && Array.isArray(state.deletedSessions)) {
           const deletedCollName = resolveCollectionName("deleted_sessions");
-          console.log(`♻️ Syncing ${state.deletedSessions.length} deleted sessions to [${deletedCollName}]...`);
+          let newlySyncedCount = 0;
           
           for (const ds of state.deletedSessions) {
             const dsId = String(ds.sessionId || ds.session_id || ds.id);
             if (ds && dsId) {
+              if (syncedDeletedSet.has(dsId)) {
+                continue; // Skip already-synced deletion stub to conserve write quota!
+              }
               const dsRef = doc(db, deletedCollName, dsId);
               await withTimeout(setDoc(dsRef, {
                 session_id: dsId,
@@ -458,24 +518,47 @@ export class FirebaseBackupService {
                 session_data: typeof ds.sessionData === 'string' ? ds.sessionData : JSON.stringify(ds.sessionData || ds.session_data || {})
               }, { merge: true }), 5000, `sync-deleted-${dsId}`);
               writeCount++;
+              syncedDeletedSet.add(dsId);
+              newlySyncedCount++;
+            }
+          }
+
+          if (newlySyncedCount > 0) {
+            try {
+              dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('synced_deleted_session_ids', ?)", [JSON.stringify(Array.from(syncedDeletedSet))]);
+            } catch (err) {
+              console.warn("Failed saving synced_deleted_session_ids:", err);
             }
           }
         }
 
-        // 🛡️ SYNC PERMANENT TOMBSTONES INDIVIDUALLY:
+        // 🛡️ SYNC PERMANENT TOMBSTONES INDIVIDUALLY (Only write if unsynced):
         if (state.permanentTombstones && Array.isArray(state.permanentTombstones)) {
           const tombstonesCollName = resolveCollectionName("permanent_tombstones");
-          console.log(`🛡️ Syncing ${state.permanentTombstones.length} tombstones to [${tombstonesCollName}]...`);
+          let newlySyncedCount = 0;
           
           for (const ts of state.permanentTombstones) {
             if (ts && ts.sessionId) {
               const tsId = String(ts.sessionId);
+              if (syncedTombstoneSet.has(tsId)) {
+                continue; // Skip already-synced tombstone to conserve write quota!
+              }
               const tsRef = doc(db, tombstonesCollName, tsId);
               await withTimeout(setDoc(tsRef, {
                 session_id: ts.sessionId,
                 tombstoned_at: ts.tombstonedAt
               }, { merge: true }), 5000, `sync-tombstone-${tsId}`);
               writeCount++;
+              syncedTombstoneSet.add(tsId);
+              newlySyncedCount++;
+            }
+          }
+
+          if (newlySyncedCount > 0) {
+            try {
+              dbService.run("INSERT OR REPLACE INTO settings (key, value) VALUES ('synced_tombstone_ids', ?)", [JSON.stringify(Array.from(syncedTombstoneSet))]);
+            } catch (err) {
+              console.warn("Failed saving synced_tombstone_ids:", err);
             }
           }
         }

@@ -555,41 +555,9 @@ export default function App() {
     };
   }, [assignPopoverItemId]);
 
-  // 5-minute auto-sync
+  // 5-minute auto-sync (Disabled per user request to prevent automatic non-button syncing)
   useEffect(() => {
-    const interval = setInterval(() => {
-      const storedUser = localStorage.getItem("inventory_logged_in_user");
-      const parsedUser = storedUser ? JSON.parse(storedUser) : null;
-      if (parsedUser && parsedUser.role === "storekeeper") {
-        console.log("🛡️ Auto-sync interval bypassed for storekeeper.");
-        return;
-      }
-      const hasPending = localStorage.getItem("inventory_has_pending_assignments") === "true";
-      if (hasPending) {
-        console.log("🛡️ Auto-sync interval bypassed: pending supervisor assignments.");
-        return;
-      }
-
-      const precodedUsers = JSON.parse(localStorage.getItem("inventory_precoded_users") || "[]");
-      const registeredUsers = JSON.parse(localStorage.getItem("inventory_registered_users") || "[]");
-      const masterItems = JSON.parse(localStorage.getItem("inventory_master_items") || "[]");
-      const activeSession = JSON.parse(localStorage.getItem("inventory_active_session") || "null");
-      const pastSessions = JSON.parse(localStorage.getItem("inventory_past_sessions") || "[]");
-      const isFirebaseSyncDisabled = localStorage.getItem("inventory_firebase_sync_disabled") === "true";
-      
-      pushStateToServer({
-        precodedUsers,
-        registeredUsers,
-        masterItems,
-        activeSession,
-        pastSessions,
-        isFirebaseSyncDisabled
-      }, { isExplicitAction: false });
-      
-      console.log("⏱️ Auto-sync triggered.");
-    }, 300000); // 5 minutes
-    
-    return () => clearInterval(interval);
+    console.log("⏱️ Periodic background auto-sync is completely disabled as requested by the user. Syncing only occurs via explicit buttons.");
   }, []);
 
   // Real-time server pull polling (every 8 seconds) to sync storekeeper submissions and live updates instantly without stale closures!
@@ -609,18 +577,9 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (!user) return;
-
-    // Disabled active 8s background auto-polling to conserve the daily Firestore quota.
-    // Instead of continuous automated reads, synchronization happens manually via the Sync button
-    // or through explicit actions. A slow 10-minute silent background pull is kept as a last-resort safeguard.
-    const pullInterval = setInterval(() => {
-      if (pullCallbackRef.current) {
-        pullCallbackRef.current();
-      }
-    }, 600000); // Poll once every 10 minutes instead of every 8 seconds
-
-    return () => clearInterval(pullInterval);
+    // Background polling disabled as requested by the user to prevent automatic non-button syncing.
+    // Synchronization of counts and active items occurs strictly when explicit buttons are pressed.
+    console.log("⏱️ Background polling is completely disabled as requested by the user.");
   }, [user]);
 
   // Initial Sync from IndexedDB on startup
